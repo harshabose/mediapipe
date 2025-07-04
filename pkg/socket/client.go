@@ -535,7 +535,7 @@ func NewClient(ctx context.Context, config ClientConfig) *Client {
 //  3. Reader/writer setup for media pipeline integration
 //  4. Connection health monitoring
 //  5. Automatic reconnection on failures
-//   5. Automatic reconnection on failures
+//  5. Automatic reconnection on failures
 //
 // Connection state changes are reflected in the metrics and can be monitored
 // via GetMetrics(). The client will continue attempting connections until
@@ -696,7 +696,7 @@ func (c *Client) setReaderWriter(reader *ioreader.Reader, writer *iowriter.Write
 //  2. Read data from the WebSocket connection
 //  3. Update metrics for successful reads
 //  4. Trigger reconnection on read failures
-//   4. Trigger reconnection on read failures
+//  4. Trigger reconnection on read failures
 //
 // Returns:
 //   - []byte: Data read from the WebSocket connection
@@ -759,7 +759,7 @@ func (c *Client) Generate() ([]byte, error) {
 //  2. Write data to the WebSocket connection
 //  3. Update metrics for successful writes
 //  4. Trigger reconnection on write failures
-//   4. Trigger reconnection on write failures
+//  4. Trigger reconnection on write failures
 //
 // Parameters:
 //   - data: Byte slice to write to the WebSocket connection
@@ -820,8 +820,9 @@ func (c *Client) Consume(data []byte) error {
 // Returns:
 //   - map[string]interface{}: Complete metrics snapshot suitable for monitoring
 //
-\n", metric
 // Example:
+//
+//	metrics := client.GetMetric
 //	metrics := client.GetMetrics()
 //	fmt.Printf("Connection state: %s\n", metrics["state"])
 //	fmt.Printf("Bytes written: %d\n", metrics["bytesWritten"])
@@ -849,7 +850,7 @@ func (c *Client) performLogin() error {
 //  1. Cancels the client context to stop all background operations
 //  2. Waits for all background goroutines to complete
 //  3. Ensures proper resource cleanup
-//   3. Ensures proper resource cleanup
+//  3. Ensures proper resource cleanup
 //
 // After Close() returns, the client cannot be reused and a new client
 // must be created for subsequent connections.
@@ -857,8 +858,9 @@ func (c *Client) performLogin() error {
 // Returns:
 //   - error: Always returns nil in current implementation
 //
-eanup on fu
 // Example:
+//
+//	client := NewClient(ctx, conf
 //	client := NewClient(ctx, config)
 //	client.Connect()
 //	defer client.Close() // Ensures cleanup on function exit
