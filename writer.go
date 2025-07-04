@@ -26,7 +26,7 @@
 // This allows building complex media routing topologies where any source can
 // feed any destination through the same unified pipeline.
 
-package mediasink
+package mediapipe
 
 import (
 	"context"

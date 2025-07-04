@@ -183,10 +183,10 @@ func WithOpusOptions(channelCount int) ClientOption {
 //	    defer client.Close()
 //
 //	    // Set up pipeline: WebRTC → Reader → BufferedWriter → RTSP
-//	    pionGenerator := mediasink.NewPionRTPGenerator(track)
-//	    reader := mediasink.NewReader(pionGenerator, transformer)
-//	    writer := mediasink.NewAnyWriter(client, transformer)
-//	    buffered := mediasink.NewBufferedWriter(ctx, writer, 100)
+//	    pionGenerator := mediapipe.NewPionRTPGenerator(track)
+//	    reader := mediapipe.NewReader(pionGenerator, transformer)
+//	    writer := mediapipe.NewAnyWriter(client, transformer)
+//	    buffered := mediapipe.NewBufferedWriter(ctx, writer, 100)
 //	})
 func WithOptionsFromRemote(remote *webrtc.TrackRemote) ClientOption {
 	switch remote.Codec().MimeType {

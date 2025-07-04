@@ -43,8 +43,8 @@
 //	bufferedReader := mediasource.NewBufferedReader(ctx, reader, 100)
 //
 //	// Use as data sink in media pipeline
-//	writer := mediasink.NewIdentityAnyWriter(client)
-//	bufferedWriter := mediasink.NewBufferedWriter(ctx, writer, 100)
+//	writer := mediapipe.NewIdentityAnyWriter(client)
+//	bufferedWriter := mediapipe.NewBufferedWriter(ctx, writer, 100)
 //
 // # Connection Management
 //

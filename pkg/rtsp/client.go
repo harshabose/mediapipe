@@ -63,8 +63,8 @@
 //	defer client.Close()
 //
 //	// Use with universal media router
-//	writer := mediasink.NewAnyWriter(client, transformer)
-//	buffered := mediasink.NewBufferedWriter(ctx, writer, 100)
+//	writer := mediapipe.NewAnyWriter(client, transformer)
+//	buffered := mediapipe.NewBufferedWriter(ctx, writer, 100)
 //
 //	// Stream any RTP source to RTSP server
 //	buffered.Write(rtpData)
@@ -317,8 +317,8 @@ type Client struct {
 //	defer client.Close()
 //
 //	// Use with universal media router
-//	writer := mediasink.NewAnyWriter(client, transformer)
-//	buffered := mediasink.NewBufferedWriter(ctx, writer, 100)
+//	writer := mediapipe.NewAnyWriter(client, transformer)
+//	buffered := mediapipe.NewBufferedWriter(ctx, writer, 100)
 func NewClient(ctx context.Context, config *ClientConfig, des *description.Session, options ...ClientOption) (*Client, error) {
 	if config == nil {
 		config = DefaultClientConfig()
@@ -525,7 +525,7 @@ func (c *Client) monitorConnection() {
 	}
 }
 
-// Consume implements mediasink.CanConsume[*rtp.Packet], allowing the RTSP client
+// Consume implements mediapipe.CanConsume[*rtp.Packet], allowing the RTSP client
 // to act as a destination in the universal media routing system.
 //
 // This method receives RTP packets from the media pipeline and transmits them
@@ -549,8 +549,8 @@ func (c *Client) monitorConnection() {
 //
 // Example usage in pipeline:
 //
-//	writer := mediasink.NewAnyWriter(rtspClient, transformer)
-//	buffered := mediasink.NewBufferedWriter(ctx, writer, 100)
+//	writer := mediapipe.NewAnyWriter(rtspClient, transformer)
+//	buffered := mediapipe.NewBufferedWriter(ctx, writer, 100)
 //
 //	// Data flows: Pipeline → BufferedWriter → Writer → RTSP Client → RTSP Serve
 //	err := buffered.Write(rtpData)

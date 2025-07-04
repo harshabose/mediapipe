@@ -68,7 +68,7 @@ The combined error supports standard Go error handling mechanisms:
 ```go
 import (
     "errors"
-    "github.com/harshabose/mediasink/internal/utils/multierr"
+    "github.com/harshabose/mediapipe/internal/utils/multierr"
 )
 
 var ErrNotFound = errors.New("not found")

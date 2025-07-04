@@ -1,4 +1,4 @@
-// Package mediasink provides a universal, type-safe streaming media pipeline with
+// Package mediapipe provides a universal, type-safe streaming media pipeline with
 // library-agnostic data transformation capabilities.
 //
 // # Core Concept: Universal Media Router
@@ -68,7 +68,7 @@
 //       return addTCPHeaders(data)
 //   })
 
-package mediasink
+package mediapipe
 
 // Data wraps source data of type T with a transformation function that can convert
 // it to target type D. This is the core abstraction of the universal media routing

@@ -1,4 +1,4 @@
-package mediasink
+package mediapipe
 
 import (
 	"context"

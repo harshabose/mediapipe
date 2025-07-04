@@ -15,8 +15,8 @@ import (
 
 type Connection struct {
 	conn   *websocket.Conn
-	reader *mediasink.AnyReader[[]byte, []byte]
-	writer *mediasink.AnyWriter[[]byte, []byte]
+	reader *mediapipe.AnyReader[[]byte, []byte]
+	writer *mediapipe.AnyWriter[[]byte, []byte]
 	ctx    context.Context
 	cancel context.CancelFunc
 	once   sync.Once
@@ -51,8 +51,8 @@ func NewConnection(ctx context.Context, conn *websocket.Conn, msgType websocket.
 	}
 
 	c := &Connection{
-		reader: mediasink.NewIdentityAnyReader[[]byte](reader),
-		writer: mediasink.NewIdentityAnyWriter[[]byte](writer),
+		reader: mediapipe.NewIdentityAnyReader[[]byte](reader),
+		writer: mediapipe.NewIdentityAnyWriter[[]byte](writer),
 		ctx:    ctx2,
 		cancel: cancel,
 	}
@@ -94,8 +94,8 @@ func (c *Connection) Close() {
 }
 
 type Pipe struct {
-	readPipe    *mediasink.FanoutPipe[[]byte, []byte]
-	writePipe   *mediasink.MergePipe[[]byte, []byte]
+	readPipe    *mediapipe.FanoutPipe[[]byte, []byte]
+	writePipe   *mediapipe.MergePipe[[]byte, []byte]
 	owner       *Connection
 	connections map[string]*Connection // Track all connected clients
 	mux         sync.RWMutex
@@ -103,8 +103,8 @@ type Pipe struct {
 
 func NewPipe(owner *Connection) *Pipe {
 	return &Pipe{
-		readPipe:    mediasink.NewFanoutPipe(owner.ctx, owner.reader),
-		writePipe:   mediasink.NewMergePipe(owner.ctx, owner.writer),
+		readPipe:    mediapipe.NewFanoutPipe(owner.ctx, owner.reader),
+		writePipe:   mediapipe.NewMergePipe(owner.ctx, owner.writer),
 		owner:       owner,
 		connections: make(map[string]*Connection),
 	}

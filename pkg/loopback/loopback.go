@@ -13,8 +13,8 @@
 //
 // The LoopBack implements both fundamental interfaces of the media routing system:
 //
-//	Input Side:  UDP Socket → LoopBack.Read() → mediasink.Reader → Pipeline
-//	Output Side: Pipeline → mediasink.Writer → LoopBack.Consume() → UDP Socket
+//	Input Side:  UDP Socket → LoopBack.Read() → mediapipe.Reader → Pipeline
+//	Output Side: Pipeline → mediapipe.Writer → LoopBack.Consume() → UDP Socket
 //
 // This bidirectional nature enables powerful use cases:
 //   - Network-based media routing between different systems
@@ -247,8 +247,8 @@ type LoopBack[T any] struct {
 //	defer loopback.Close()
 //
 //	// LoopBack is immediately ready for use as both source and sink
-//	reader := mediasink.NewReader(loopback, transformer)
-//	writer := mediasink.NewAnyWriter(loopback, transformer)
+//	reader := mediapipe.NewReader(loopback, transformer)
+//	writer := mediapipe.NewAnyWriter(loopback, transformer)
 func NewLoopBack[T any](ctx context.Context, bindAddr string, options ...Option[T]) (*LoopBack[T], error) {
 	addr, err := net.ResolveUDPAddr("udp", bindAddr)
 	if err != nil {
@@ -276,7 +276,7 @@ func NewLoopBack[T any](ctx context.Context, bindAddr string, options ...Option[
 	return l, nil
 }
 
-// Consume implements mediasink.CanConsume[[]byte], allowing the LoopBack
+// Consume implements mediapipe.CanConsume[[]byte], allowing the LoopBack
 // to act as a data sink in the universal media routing system.
 //
 // This method receives byte payloads from the pipeline and transmits them
@@ -298,8 +298,8 @@ func NewLoopBack[T any](ctx context.Context, bindAddr string, options ...Option[
 //
 // Example usage in pipeline:
 //
-//	writer := mediasink.NewIdentityAnyWriter(loopback)
-//	bufferedWriter := mediasink.NewBufferedWriter(ctx, writer, 100)
+//	writer := mediapipe.NewIdentityAnyWriter(loopback)
+//	bufferedWriter := mediapipe.NewBufferedWriter(ctx, writer, 100)
 //
 //	// Data flows: Pipeline → BufferedWriter → AnyWriter → LoopBack.Consume → UDP
 //	err := bufferedWriter.Write(data) // data gets transformed to []byte and calls Consume
@@ -367,7 +367,7 @@ func (l *LoopBack[T]) Close() error {
 	return err
 }
 
-// Read implements mediasink.CanGenerate[[]byte], allowing the LoopBack to act as
+// Read implements mediapipe.CanGenerate[[]byte], allowing the LoopBack to act as
 // a data source in the universal media routing system.
 //
 // This method reads data from the UDP socket and returns it as byte slices that
@@ -386,8 +386,8 @@ func (l *LoopBack[T]) Close() error {
 //
 // Example usage in pipeline:
 //
-//	reader := mediasink.NewReader(loopback, transformer)
-//	bufferedReader := mediasink.NewBufferedReader(ctx, reader, 100)
+//	reader := mediapipe.NewReader(loopback, transformer)
+//	bufferedReader := mediapipe.NewBufferedReader(ctx, reader, 100)
 //
 //	// Data flows: UDP → LoopBack.Read → Reader → BufferedReader → Pipeline
 //	data, err := bufferedReader.Read()

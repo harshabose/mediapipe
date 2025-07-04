@@ -26,7 +26,7 @@
 //   - N:1 data merging with MergePipe
 //   - Multi-stage processing by chaining pipes
 
-package mediasink
+package mediapipe
 
 import (
 	"context"
