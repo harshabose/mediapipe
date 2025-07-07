@@ -52,12 +52,6 @@ import (
 	"time"
 )
 
-// metrics tracks bidirectional data flow statistics for observability and monitoring.
-// This provides real-time insights into the LoopBack's performance characteristics,
-// which is essential for production deployments and debugging network issues.
-//
-// The metrics are thread-safe and automatically calculate data rates over time,
-// giving operators visibility into both instantaneous and averaged throughput.
 type metrics struct {
 	DataSent      int64   // Total bytes sent since startup
 	DataRecvd     int64   // Total bytes received since startup
@@ -87,12 +81,6 @@ func newMetrics(ctx context.Context) *metrics {
 	return m
 }
 
-// updateRates calculates the current data transfer rates based on the change
-// in total bytes transferred since the last update.
-//
-// This method is called periodically by the metrics loop to provide real-time
-// visibility into network throughput. The rates are calculated as bytes per second
-// over the time interval since the last update.
 func (m *metrics) updateRates() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -137,68 +125,25 @@ func (m *metrics) Close() error {
 	return nil
 }
 
-// addSent atomically increments the total bytes sent counter and is called
-// whenever data is successfully written to the UDP socket.
 func (m *metrics) addSent(bytes int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.DataSent += bytes
 }
 
-// addRecvd atomically increments the total bytes received counter and is called
-// whenever data is successfully read from the UDP socket.
 func (m *metrics) addRecvd(bytes int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.DataRecvd += bytes
 }
 
-// GetStats returns a consistent snapshot of current metrics including both
-// cumulative totals and current transfer rates.
-//
-// Returns:
-//   - sent: Total bytes sent since startup
-//   - recvd: Total bytes received since startup
-//   - sentRate: Current send rate in bytes per second
-//   - recvdRate: Current receive rate in bytes per second
 func (m *metrics) GetStats() (sent, recvd int64, sentRate, recvdRate float32) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.DataSent, m.DataRecvd, m.DataSentRate, m.DataRecvdRate
 }
 
-// LoopBack is a bidirectional UDP-based bridge that implements both CanGenerate and CanConsume
-// interfaces, enabling it to participate in the universal media routing system as both
-// a data source and data sink simultaneously.
-//
-// Type parameter:
-//   - T: The source type for Data elements when acting as a consumer (typically matches
-//     the pipeline's source data type for proper type relationships)
-//
-// # Key Features:
-//
-//   - Bidirectional data flow through UDP sockets
-//   - Automatic remote endpoint discovery from incoming packets
-//   - Built-in metrics and monitoring for production observability
-//   - Thread-safe operations with proper resource management
-//   - Graceful shutdown with context cancellation
-//   - Production-ready error handling and logging
-//
-// # Network Behavior:
-//
-//   - Listens on a bound UDP port for incoming data (CanGenerate side)
-//   - Sends data to a discovered or configured remote UDP endpoint (CanConsume side)
-//   - Automatically discovers remote endpoint from first received packet
-//   - Supports manual remote endpoint configuration for explicit routing
-//
-// # Integration with Media Router:
-//
-//	As CanGenerate: LoopBack → Reader → BufferedReader → Pipeline
-//	As CanConsume:  Pipeline → BufferedWriter → Writer → LoopBack
-//
-// This enables complex routing topologies where data can flow through network
-// boundaries and be processed by remote systems before returning to local pipelines.
-type LoopBack[T any] struct {
+type LoopBack struct {
 	bindPort *net.UDPConn // UDP socket for bidirectional communication
 	remote   *net.UDPAddr // Remote endpoint address (auto-discovered or manually set)
 
@@ -207,49 +152,7 @@ type LoopBack[T any] struct {
 	mu sync.RWMutex // Protects concurrent access to connection state
 }
 
-// NewLoopBack creates a new LoopBack instance bound to the specified UDP address
-// and immediately starts its background operations.
-//
-// The LoopBack will listen on the provided address for incoming data and will
-// automatically discover the remote endpoint from the first packet received.
-// Alternatively, the remote endpoint can be set explicitly using SetRemoteAddress.
-//
-// Parameters:
-//   - ctx: Parent context for lifecycle management. When cancelled, the LoopBack
-//     will gracefully shut down all background operations.
-//   - bindAddr: Local UDP address to bind to (e.g., ":8080" or "0.0.0.0:8080")
-//   - options: Optional configuration functions that customize the LoopBack behavior.
-//     Options are applied after basic initialization but before the LoopBack is ready.
-//
-// Returns a fully configured and active LoopBack ready for immediate use as both
-// a data source and sink in the universal media routing system.
-//
-// The LoopBack automatically starts its metrics collection goroutine and is
-// immediately ready for data transfer operations in both directions. Any provided
-// options are applied during initialization to customize behavior.
-//
-// Example:
-//
-//	// Basic LoopBack
-//	loopback, err := NewLoopBack[*rtp.Packet](ctx, "0.0.0.0:5004")
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	defer loopback.Close()
-//
-//	// LoopBack with options
-//	loopback, err := NewLoopBack[*rtp.Packet](ctx, "0.0.0.0:5004",
-//	    WithRemoteAddress("192.168.1.100:5004"),
-//	    WithBufferSize(2048))
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	defer loopback.Close()
-//
-//	// LoopBack is immediately ready for use as both source and sink
-//	reader := mediapipe.NewReader(loopback, transformer)
-//	writer := mediapipe.NewAnyWriter(loopback, transformer)
-func NewLoopBack[T any](ctx context.Context, bindAddr string, options ...Option[T]) (*LoopBack[T], error) {
+func NewLoopBack(ctx context.Context, bindAddr string, options ...Option) (*LoopBack, error) {
 	addr, err := net.ResolveUDPAddr("udp", bindAddr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve bind address: %v", err)
@@ -260,7 +163,7 @@ func NewLoopBack[T any](ctx context.Context, bindAddr string, options ...Option[
 		return nil, fmt.Errorf("failed to bind UDP socket: %v", err)
 	}
 
-	l := &LoopBack[T]{
+	l := &LoopBack{
 		bindPort: conn,
 		metrics:  newMetrics(ctx),
 	}
@@ -276,54 +179,21 @@ func NewLoopBack[T any](ctx context.Context, bindAddr string, options ...Option[
 	return l, nil
 }
 
-// Consume implements mediapipe.CanConsume[[]byte], allowing the LoopBack
-// to act as a data sink in the universal media routing system.
-//
-// This method receives byte payloads from the pipeline and transmits them
-// over UDP to the configured remote endpoint. The LoopBack can accept data
-// from any source in the pipeline that produces []byte output.
-//
-// The method integrates seamlessly with the universal media routing system:
-//   - AnyWriter handles Data[D, T] transformation and calls this method with []byte
-//   - BufferedWriter provides asynchronous buffering before calling this method
-//   - The pipeline ensures proper data flow and error handling
-//
-// Parameters:
-//   - payload: The byte slice to be transmitted over UDP. Empty payloads are allowed.
-//
-// Returns an error if:
-//   - No remote endpoint is configured or discovered
-//   - UDP transmission fails
-//   - The number of bytes written doesn't match the payload size
-//
-// Example usage in pipeline:
-//
-//	writer := mediapipe.NewIdentityAnyWriter(loopback)
-//	bufferedWriter := mediapipe.NewBufferedWriter(ctx, writer, 100)
-//
-//	// Data flows: Pipeline → BufferedWriter → AnyWriter → LoopBack.Consume → UDP
-//	err := bufferedWriter.Write(data) // data gets transformed to []byte and calls Consume
-func (l *LoopBack[T]) Consume(payload []byte) error {
+func (l *LoopBack) Consume(payload []byte) error {
 	return l.write(payload)
 }
 
-// write transmits the byte payload to the configured remote UDP endpoint.
-//
-// This internal method handles the actual UDP transmission with proper error
-// checking and metrics tracking. It ensures that the complete payload is
-// transmitted and updates the send metrics accordingly.
-//
-// The method is thread-safe and can be called concurrently from multiple
-// goroutines, though it's typically called sequentially from the pipeline.
-func (l *LoopBack[T]) write(payload []byte) error {
+func (l *LoopBack) write(payload []byte) error {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
 	if l.bindPort == nil {
-		return fmt.Errorf("bind port not yet set. Skipping message")
+		fmt.Printf("bind port not yet set. Skipping message; no error")
+		return nil
 	}
 	if l.remote == nil {
-		return fmt.Errorf("remote port not yet discovered. Skipping message")
+		fmt.Printf("remote port not yet discovered. Skipping message; no error")
+		return nil
 	}
 
 	bytesWritten, err := l.bindPort.WriteToUDP(payload, l.remote)
@@ -335,22 +205,34 @@ func (l *LoopBack[T]) write(payload []byte) error {
 		return fmt.Errorf("written bytes (%d) != message length (%d)", bytesWritten, len(payload))
 	}
 
-	// Update metrics
 	l.metrics.addSent(int64(bytesWritten))
 
 	return nil
 }
 
-// Close gracefully shuts down the LoopBack, releasing network resources.
-//
-// This method:
-//  1. Closes the UDP socket to stop network operations
-//
-// It's safe to call Close multiple times. After calling Close, the LoopBack
-// should not be used for further operations.
-//
-// Returns any error from closing the UDP socket.
-func (l *LoopBack[T]) Close() error {
+func (l *LoopBack) Generate() ([]byte, error) {
+	return l.read()
+}
+
+func (l *LoopBack) read() ([]byte, error) {
+	// Set read timeout to allow periodic context checking
+	if err := l.bindPort.SetReadDeadline(time.Now().Add(1 * time.Second)); err != nil {
+		fmt.Printf("Error while setting read deadline on UDP bind port: %v. Continuing...\n", err)
+	}
+
+	buff, nRead := l.readMessageFromUDPPort()
+	if nRead > 0 && buff != nil {
+		// Update metrics
+		l.metrics.addRecvd(int64(nRead))
+
+		return buff[:nRead], nil
+	}
+
+	// Return nil to indicate no data available (Reader should handle appropriately)
+	return nil, nil
+}
+
+func (l *LoopBack) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -367,74 +249,11 @@ func (l *LoopBack[T]) Close() error {
 	return err
 }
 
-// Read implements mediapipe.CanGenerate[[]byte], allowing the LoopBack to act as
-// a data source in the universal media routing system.
-//
-// This method reads data from the UDP socket and returns it as byte slices that
-// can be fed into the media routing pipeline. It uses a read timeout to allow
-// periodic context checking without blocking indefinitely.
-//
-// The method handles:
-//   - Automatic remote endpoint discovery from incoming packets
-//   - Timeout-based non-blocking reads for context responsiveness
-//   - Metrics tracking for received data
-//   - Proper error handling for network issues
-//
-// Returns:
-//   - []byte: Data received from the network, or nil if no data is available
-//   - error: Any error that occurred during reading
-//
-// Example usage in pipeline:
-//
-//	reader := mediapipe.NewReader(loopback, transformer)
-//	bufferedReader := mediapipe.NewBufferedReader(ctx, reader, 100)
-//
-//	// Data flows: UDP → LoopBack.Read → Reader → BufferedReader → Pipeline
-//	data, err := bufferedReader.Read()
-func (l *LoopBack[T]) Read() ([]byte, error) {
-	// Set read timeout to allow periodic context checking
-	if err := l.bindPort.SetReadDeadline(time.Now().Add(1 * time.Second)); err != nil {
-		fmt.Printf("Error while setting read deadline on UDP bind port: %v. Continuing...\n", err)
-	}
-
-	buff, nRead := l.readMessageFromUDPPort()
-	if nRead > 0 && buff != nil {
-		// Update metrics
-		l.metrics.addRecvd(int64(nRead))
-
-		return buff[:nRead], nil
-	}
-
-	// Return nil to indicate no data available (Reader will handle appropriately)
-	return nil, nil
-}
-
-// metricsLoop runs in a background goroutine and periodically updates the
-// data transfer rate calculations.
-//
-// This goroutine runs for the lifetime of the LoopBack connection and provides
-// real-time visibility into network performance. It updates metrics every second
-// to provide current throughput rates for monitoring and debugging.
-func (l *LoopBack[T]) metricsLoop() {
-
-}
-
-// readMessageFromUDPPort performs a single UDP read operation with proper
-// error handling and automatic remote endpoint discovery.
-//
-// This internal method handles:
-//   - Reading data from the UDP socket
-//   - Distinguishing between timeout errors (expected) and real errors
-//   - Automatic discovery of remote endpoint from sender address
-//   - Optional validation of sender address for security
-//
-// Returns the buffer and number of bytes read, or nil/0 if no data is available.
-func (l *LoopBack[T]) readMessageFromUDPPort() ([]byte, int) {
+func (l *LoopBack) readMessageFromUDPPort() ([]byte, int) {
 	buffer := make([]byte, 1500) // Standard MTU size
 
 	nRead, senderAddr, err := l.bindPort.ReadFromUDP(buffer)
 	if err != nil {
-		// Check if it's a timeout (which is expected)
 		var netErr net.Error
 		if errors.As(err, &netErr) && netErr.Timeout() {
 			return nil, 0
@@ -451,7 +270,6 @@ func (l *LoopBack[T]) readMessageFromUDPPort() ([]byte, int) {
 	}
 	l.mu.Unlock()
 
-	// Validate sender (optional security check)
 	if senderAddr != nil && l.remote != nil && senderAddr.Port != l.remote.Port {
 		fmt.Printf("Warning: expected port %d but got %d\n", l.remote.Port, senderAddr.Port)
 	}
@@ -459,24 +277,7 @@ func (l *LoopBack[T]) readMessageFromUDPPort() ([]byte, int) {
 	return buffer, nRead
 }
 
-// SetRemoteAddress manually configures the remote UDP endpoint address.
-//
-// This provides an alternative to automatic endpoint discovery for scenarios
-// where the remote address is known in advance or needs to be explicitly
-// controlled for security or routing purposes.
-//
-// Parameters:
-//   - address: Remote UDP address in "host:port" format (e.g., "192.168.1.100:5004")
-//
-// Returns an error if the address cannot be resolved.
-//
-// Example:
-//
-//	err := loopback.SetRemoteAddress("192.168.1.100:5004")
-//	if err != nil {
-//	    log.Printf("Failed to set remote address: %v", err)
-//	}
-func (l *LoopBack[T]) SetRemoteAddress(address string) error {
+func (l *LoopBack) SetRemoteAddress(address string) error {
 	addr, err := net.ResolveUDPAddr("udp", address)
 	if err != nil {
 		return fmt.Errorf("failed to resolve remote address: %v", err)
@@ -490,34 +291,11 @@ func (l *LoopBack[T]) SetRemoteAddress(address string) error {
 	return nil
 }
 
-// GetMetrics returns a snapshot of current performance metrics including
-// both cumulative totals and current transfer rates.
-//
-// This provides visibility into the LoopBack's network performance for
-// monitoring, debugging, and capacity planning purposes.
-//
-// Returns:
-//   - sent: Total bytes sent since startup
-//   - recvd: Total bytes received since startup
-//   - sentRate: Current send rate in bytes per second
-//   - recvdRate: Current receive rate in bytes per second
-//
-// Example:
-//
-//	sent, recvd, sentRate, recvdRate := loopback.GetMetrics()
-//	fmt.Printf("Sent: %d bytes (%.2f B/s), Received: %d bytes (%.2f B/s)",
-//	    sent, sentRate, recvd, recvdRate)
-func (l *LoopBack[T]) GetMetrics() (sent, recvd int64, sentRate, recvdRate float32) {
+func (l *LoopBack) GetMetrics() (sent, recvd int64, sentRate, recvdRate float32) {
 	return l.metrics.GetStats()
 }
 
-// GetLocalAddress returns the local UDP address that the LoopBack is bound to.
-//
-// This is useful for logging, debugging, and for communicating the address
-// to remote systems that need to send data to this LoopBack.
-//
-// Returns an empty string if the LoopBack is not properly initialized.
-func (l *LoopBack[T]) GetLocalAddress() string {
+func (l *LoopBack) GetLocalAddress() string {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
@@ -527,13 +305,7 @@ func (l *LoopBack[T]) GetLocalAddress() string {
 	return l.bindPort.LocalAddr().String()
 }
 
-// GetRemoteAddress returns the current remote UDP endpoint address.
-//
-// This returns the address that was either auto-discovered from incoming
-// packets or manually configured via SetRemoteAddress.
-//
-// Returns an empty string if no remote address has been discovered or configured.
-func (l *LoopBack[T]) GetRemoteAddress() string {
+func (l *LoopBack) GetRemoteAddress() string {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 

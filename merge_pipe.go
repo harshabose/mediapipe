@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/emirpasic/gods/v2/sets/linkedhashset"
 
@@ -116,13 +117,17 @@ func (p *MergePipe[D, T]) AddReader(r Reader[D, T]) (context.Context, context.Ca
 		p.mux.Lock()
 		defer p.mux.Unlock()
 
-		p.readers.Remove(reader)
+		if p.readers != nil {
+			p.readers.Remove(reader)
+			fmt.Println("removed reader")
+		}
 	})
 
 	p.mux.Lock()
 	defer p.mux.Unlock()
 
 	p.readers.Add(reader)
+	fmt.Println("added reader")
 
 	return ctx, cancel
 }
@@ -153,6 +158,7 @@ func (p *MergePipe[D, T]) UnPause() {
 }
 
 func (p *MergePipe[D, T]) loop() {
+	defer p.Close()
 	defer p.wg.Done()
 
 	for {
@@ -166,12 +172,13 @@ func (p *MergePipe[D, T]) loop() {
 
 			data, err := p.read()
 			if err != nil {
-				fmt.Printf("pipe error while reading: %v", err)
+				// fmt.Printf("merge pipe error while reading: %v\n", err)
+				time.Sleep(10 * time.Millisecond)
 				continue
 			}
 
 			if err := p.write(data); err != nil {
-				fmt.Printf("pipe error while writing: %v", err)
+				fmt.Printf("pipe error while writing: %v\n", err)
 				return
 			}
 		}

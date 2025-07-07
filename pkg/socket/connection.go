@@ -9,8 +9,6 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/harshabose/mediasink"
-	"github.com/harshabose/mediasink/pkg/ioreader"
-	"github.com/harshabose/mediasink/pkg/iowriter"
 )
 
 type Connection struct {
@@ -20,76 +18,30 @@ type Connection struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	once   sync.Once
-	wg     sync.WaitGroup
 }
 
-func NewConnection(ctx context.Context, conn *websocket.Conn, msgType websocket.MessageType, readBufSize, writeBufSize uint32) (*Connection, error) {
+func NewConnection(ctx context.Context, conn *websocket.Conn, msgType websocket.MessageType, readTimeout time.Duration, writeTimeout time.Duration) *Connection {
 	ctx2, cancel := context.WithCancel(ctx)
 
-	_, r, err := conn.Reader(ctx2)
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-
-	reader, err := ioreader.NewReader(r, readBufSize)
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-
-	w, err := conn.Writer(ctx2, msgType)
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-
-	writer, err := iowriter.NewWriter(w, writeBufSize)
-	if err != nil {
-		cancel()
-		return nil, err
-	}
+	rw := NewSocketReaderWriter(ctx2, conn, msgType, readTimeout, writeTimeout)
 
 	c := &Connection{
-		reader: mediapipe.NewIdentityAnyReader[[]byte](reader),
-		writer: mediapipe.NewIdentityAnyWriter[[]byte](writer),
+		conn:   conn,
+		reader: mediapipe.NewIdentityAnyReader[[]byte](rw),
+		writer: mediapipe.NewIdentityAnyWriter[[]byte](rw),
 		ctx:    ctx2,
 		cancel: cancel,
 	}
 
-	c.wg.Add(1)
-	go c.ping()
-
-	return c, nil
-}
-
-func (c *Connection) ping() {
-	defer c.Close()
-	defer c.wg.Done()
-
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-c.ctx.Done():
-			return
-		case <-ticker.C:
-			if err := c.conn.Ping(c.ctx); err != nil {
-				fmt.Printf("error while pinging to connection: %v", err)
-				return
-			}
-		}
-	}
+	return c
 }
 
 func (c *Connection) Close() {
 	c.once.Do(func() {
 		if c.cancel != nil {
+			fmt.Println("connection cancel called")
 			c.cancel()
 		}
-
-		c.wg.Wait()
 	})
 }
 
@@ -111,17 +63,22 @@ func NewPipe(owner *Connection) *Pipe {
 }
 
 func (p *Pipe) WaitUntilFatal() {
+	defer fmt.Println("fatal error occurred in WaitUntilFatal")
 	select {
 	case <-p.owner.ctx.Done():
+		fmt.Println("owner ctx done")
 		return
-	case <-p.readPipe.Wait():
+	case <-p.readPipe.Wait(): // TODO: DOES NOT RETURN WHEN READ ERROR OCCURS
+		fmt.Println("read pipe ctx done")
 		return
-	case <-p.writePipe.Wait():
+	case <-p.writePipe.Wait(): // TODO: DOES NOT RETURN WHEN WRITE ERROR OCCURS
+		fmt.Println("write pipe ctx done")
 		return
 	}
 }
 
 func (p *Pipe) AddConnectionAndWaitUntilFatal(conn *Connection) {
+	defer fmt.Println("fatal error occurred in AddConnectionAndWaitUntilFatal")
 	wCtx, wCancel := p.readPipe.AddWriter(conn.writer)
 	rCtx, rCancel := p.writePipe.AddReader(conn.reader)
 
@@ -130,10 +87,16 @@ func (p *Pipe) AddConnectionAndWaitUntilFatal(conn *Connection) {
 
 	select {
 	case <-conn.ctx.Done():
+		fmt.Println("ws connection ctx done")
+		return
+	case <-p.owner.ctx.Done():
+		fmt.Println("owner connection ctx done")
 		return
 	case <-wCtx.Done():
+		fmt.Println("reader writer ctx done")
 		return
 	case <-rCtx.Done():
+		fmt.Println("reader reader ctx done")
 		return
 	}
 }

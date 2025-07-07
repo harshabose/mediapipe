@@ -101,16 +101,64 @@ type ServerConfig struct {
 	ReadRequiredScope  []string `json:"read_required_scope"`
 	ReadRequiredRoles  []string `json:"read_required_roles"`
 
-	AllowedRooms  []string `json:"allowed_rooms"`  // empty (not nil) means allow all
-	AllowedTopics []string `json:"allowed_topics"` // empty (not nil) means allow all
+	AllowedRooms  []string `json:"allowed_rooms"`  // nil (not empty) means allow all
+	AllowedTopics []string `json:"allowed_topics"` // nil (not empty) means allow all
 
 	WriteMessageType websocket.MessageType `json:"write_message_type"`
-	WriteBufferSize  uint32                `json:"write_buffer_size"`
-	ReadBufferSize   uint32                `json:"read_buffer_size"`
+	WriteTimeout     time.Duration         `json:"write_timeout"`
+	ReadTimeout      time.Duration         `json:"read_timeout"`
+}
+
+func DefaultServerConfig() ServerConfig {
+	c := ServerConfig{}
+	c.SetDefaults()
+
+	return c
+}
+
+func (c *ServerConfig) SetDefaults() {
+	if c.TotalConnections == 0 {
+		c.TotalConnections = 100 // default max connections
+	}
+
+	if len(c.WriteRequiredScope) == 0 {
+		c.WriteRequiredScope = []string{"socket-skyline-sonata"}
+	}
+
+	if len(c.WriteRequiredRoles) == 0 {
+		c.WriteRequiredRoles = []string{"user", "moderator", "admin"}
+	}
+
+	if len(c.ReadRequiredScope) == 0 {
+		c.ReadRequiredScope = []string{"rtsp-skyline-sonata"}
+	}
+
+	if len(c.ReadRequiredRoles) == 0 {
+		c.ReadRequiredRoles = []string{"user", "moderator", "admin", "viewer", "guest"}
+	}
+
+	if len(c.AllowedRooms) == 0 {
+		c.AllowedRooms = nil // nil means allow all
+	}
+
+	if len(c.AllowedTopics) == 0 {
+		c.AllowedTopics = nil // nil means allow all
+	}
+
+	if c.WriteMessageType == 0 {
+		c.WriteMessageType = websocket.MessageBinary // default to text messages
+	}
+
+	if c.WriteTimeout == 0 {
+		c.WriteTimeout = 10 * time.Minute // default 4KB write buffer
+	}
+
+	if c.ReadTimeout == 0 {
+		c.ReadTimeout = 10 * time.Minute // default 4KB read buffer
+	}
 }
 
 type Server struct {
-	id         string
 	httpServer *https.Server
 
 	config ServerConfig
@@ -120,15 +168,18 @@ type Server struct {
 	once   sync.Once
 	ctx    context.Context
 	cancel context.CancelFunc
+	mux    sync.RWMutex
 
 	metrics *metrics
 }
 
-func NewServer(ctx context.Context, id string, config ServerConfig, httpsConfig https.Config, options ...ServerOption) (*Server, error) {
+func NewServer(ctx context.Context, config ServerConfig, httpsConfig https.Config) *Server {
+	// TODO: ADD SOCKET RELATED HEADERS AND METHODS HERE TO httpspConfig
+	httpsConfig.AddAllowedHeaders("Connections", "Upgrade", "Sec-WebSocket-Key", "Sec-WebSocket-Version", "Sec-WebSocket-Extensions", "Sec-WebSocket-Protocol", "Sec-WebSocket-Accept")
+
 	ctx2, cancel := context.WithCancel(ctx)
 
 	s := &Server{
-		id:         id,
 		httpServer: https.NewHTTPSServer(ctx, httpsConfig),
 		config:     config,
 		metrics:    &metrics{},
@@ -142,23 +193,23 @@ func NewServer(ctx context.Context, id string, config ServerConfig, httpsConfig 
 	// s.httpServer.AddRequestHandler("/ws/read/{room}/{topic}", s.httpServer.LoggingMiddleware(s.httpServer.CorsMiddleware(s.httpServer.RateLimitMiddleware(
 	// 	s.httpServer.AuthMiddlewareWithRequiredRoomExtraction(s.wsReadHandler, s.config.ReadRequiredScope, s.config.ReadRequiredRoles, auth.RoomPathExtractor("room")), true))))
 
-	s.httpServer.AddRequestHandler("/ws/write/{room}/{topic}", s.httpServer.LoggingMiddleware(s.httpServer.CorsMiddleware(s.httpServer.RateLimitMiddleware(s.wsWriteHandler, true))))
-	s.httpServer.AddRequestHandler("/ws/read/{room}/{topic}", s.httpServer.LoggingMiddleware(s.httpServer.CorsMiddleware(s.httpServer.RateLimitMiddleware(s.wsReadHandler, true))))
+	s.httpServer.AddRequestHandler("GET /ws/write/{room}/{topic}", s.httpServer.LoggingMiddleware(s.httpServer.CorsMiddleware(s.httpServer.RateLimitMiddleware(s.wsWriteHandler, true))))
+	s.httpServer.AddRequestHandler("GET /ws/read/{room}/{topic}", s.httpServer.LoggingMiddleware(s.httpServer.CorsMiddleware(s.httpServer.RateLimitMiddleware(s.wsReadHandler, true))))
 
 	s.httpServer.AddRequestHandler("GET /metrics", s.httpServer.LoggingMiddleware(s.httpServer.CorsMiddleware(
 		s.httpServer.InternalAuthMiddleware(s.httpServer.RateLimitMiddleware(s.metricsHandler, false)))))
 
-	for _, option := range options {
-		if err := option(s); err != nil {
-			return nil, fmt.Errorf("faild to apply option: %v", err)
-		}
-	}
-
-	return s, nil
+	return s
 }
 
 func (s *Server) Serve() {
 	s.httpServer.Serve()
+}
+
+func (s *Server) StartAndWait() <-chan struct{} {
+	s.Serve()
+	fmt.Printf("starting websocket server on\n")
+	return s.ctx.Done()
 }
 
 func (s *Server) UpgradeRequest(w http.ResponseWriter, req *http.Request) (*websocket.Conn, error) {
@@ -206,10 +257,25 @@ func (s *Server) wsWriteHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) WsWriteHandler(w http.ResponseWriter, r *http.Request) {
+	defer fmt.Println("exiting ws writer handler")
 	room, err := GetPathVariable(r, "room")
 	if err != nil {
 		http.Error(w, "invalid room path parameter", http.StatusBadRequest)
 		return
+	}
+
+	if s.config.AllowedRooms != nil {
+		allowed := false
+		for _, allowedRoom := range s.config.AllowedRooms {
+			if room == allowedRoom {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			http.Error(w, "room not allowed", http.StatusForbidden)
+			return
+		}
 	}
 
 	topic, err := GetPathVariable(r, "topic")
@@ -217,28 +283,49 @@ func (s *Server) WsWriteHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "topic parameter required", http.StatusBadRequest)
 		return
 	}
-	path := room + "/" + topic
 
-	conn, err := s.UpgradeRequest(w, r)
-	if err != nil {
-		http.Error(w, "Failed to upgrade to websocket", http.StatusInternalServerError)
-		return
+	if s.config.AllowedTopics != nil {
+		allowed := false
+		for _, allowedTopic := range s.config.AllowedTopics {
+			if topic == allowedTopic {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			http.Error(w, "topic not allowed", http.StatusForbidden)
+			return
+		}
 	}
 
-	_, exists := s.paths[path]
-	if exists {
+	path := room + "/" + topic
+
+	fmt.Printf("request for %s\n", path)
+
+	if err := s.ExistsPath(path); err != nil {
 		http.Error(w, "Resource already exists", http.StatusInternalServerError)
 		return
 	}
 
-	connection, err := NewConnection(r.Context(), conn, s.config.WriteMessageType, s.config.ReadBufferSize, s.config.WriteBufferSize)
+	conn, err := s.UpgradeRequest(w, r)
 	if err != nil {
-		http.Error(w, "Failed to allocate resources", http.StatusInternalServerError)
+		fmt.Printf("error while updating websocket: %v\n", err)
+		http.Error(w, "Failed to upgrade to websocket", http.StatusInternalServerError)
 		return
 	}
 
-	defer delete(s.paths, path)
-	s.paths[path] = NewPipe(connection)
+	fmt.Println("upgrade successful")
+
+	connection := NewConnection(r.Context(), conn, s.config.WriteMessageType, s.config.ReadTimeout, s.config.WriteTimeout)
+
+	defer fmt.Println("deleted path")
+	defer s.RemovePath(path)
+	defer fmt.Println("ws writer connection closed")
+	defer connection.Close()
+
+	s.AddPath(path, NewPipe(connection))
+
+	fmt.Println("readers and writers set")
 
 	s.paths[path].WaitUntilFatal()
 }
@@ -248,6 +335,7 @@ func (s *Server) wsReadHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) WsReadHandler(w http.ResponseWriter, r *http.Request) {
+	defer fmt.Println("exit ws reader connection")
 	room, err := GetPathVariable(r, "room")
 	if err != nil {
 		http.Error(w, "invalid room path parameter", http.StatusBadRequest)
@@ -261,25 +349,61 @@ func (s *Server) WsReadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	path := room + "/" + topic
 
+	pipe, err := s.GetPath(path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
 	conn, err := s.UpgradeRequest(w, r)
 	if err != nil {
 		http.Error(w, "Failed to upgrade to websocket", http.StatusInternalServerError)
 		return
 	}
 
-	pipe, exists := s.paths[path]
-	if !exists {
-		http.Error(w, "Topic not found - writer must connect first", http.StatusNotFound)
-		return
+	connection := NewConnection(r.Context(), conn, s.config.WriteMessageType, s.config.ReadTimeout, s.config.WriteTimeout)
+
+	defer fmt.Println("ws reader connection closed")
+	defer connection.Close()
+
+	pipe.AddConnectionAndWaitUntilFatal(connection) // TODO: ACCESSING PIPE AFTER MUX
+}
+
+func (s *Server) AddPath(path string, pipe *Pipe) {
+	s.mux.Lock()
+	defer s.mux.Unlock()
+
+	s.paths[path] = pipe
+}
+
+func (s *Server) GetPath(path string) (*Pipe, error) {
+	if err := s.ExistsPath(path); err == nil {
+		return nil, errors.New("topic does not exists")
 	}
 
-	connection, err := NewConnection(r.Context(), conn, s.config.WriteMessageType, s.config.ReadBufferSize, s.config.WriteBufferSize)
-	if err != nil {
-		http.Error(w, "Failed to allocate resources", http.StatusInternalServerError)
-		return
+	s.mux.RLock()
+	defer s.mux.RUnlock()
+
+	return s.paths[path], nil
+}
+
+func (s *Server) ExistsPath(path string) error {
+	s.mux.RLock()
+	defer s.mux.RUnlock()
+
+	_, exists := s.paths[path]
+	if exists {
+		return errors.New("topic already exists")
 	}
 
-	pipe.AddConnectionAndWaitUntilFatal(connection)
+	return nil
+}
+
+func (s *Server) RemovePath(path string) {
+	s.mux.Lock()
+	defer s.mux.Unlock()
+
+	delete(s.paths, path)
 }
 
 func (s *Server) Close() error {

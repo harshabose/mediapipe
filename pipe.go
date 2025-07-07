@@ -164,12 +164,12 @@ func (p *AnyPipe[D, T]) loop() {
 
 			data, err := p.read()
 			if err != nil {
-				fmt.Printf("pipe error while reading: %v", err)
+				fmt.Printf("pipe error while reading: %v\n", err)
 				return
 			}
 
 			if err := p.write(data); err != nil {
-				fmt.Printf("pipe error while writing: %v", err)
+				fmt.Printf("pipe error while writing: %v\n", err)
 				return
 			}
 		}

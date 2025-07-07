@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"reflect"
 	"sync"
 	"time"
 
@@ -136,6 +137,10 @@ func (r *AnyReader[D, T]) Read() (*Data[D, T], error) {
 	t, err := r.generator.Generate()
 	if err != nil {
 		return nil, err
+	}
+
+	if reflect.ValueOf(t).IsZero() {
+		return nil, nil
 	}
 
 	e := Wrap[D, T](t, r.transformer)

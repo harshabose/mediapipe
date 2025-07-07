@@ -120,6 +120,7 @@ func (p *FanoutPipe[D, T]) AddWriter(w Writer[D, T]) (context.Context, context.C
 		defer p.mux.Unlock()
 
 		if p.writers != nil {
+			fmt.Println("removed writer")
 			p.writers.Remove(writer)
 		}
 	})
@@ -128,6 +129,7 @@ func (p *FanoutPipe[D, T]) AddWriter(w Writer[D, T]) (context.Context, context.C
 	defer p.mux.Unlock()
 
 	p.writers.Add(writer)
+	fmt.Println("added writer")
 
 	return ctx, cancel
 }
@@ -154,6 +156,7 @@ func (p *FanoutPipe[D, T]) UnPause() {
 }
 
 func (p *FanoutPipe[D, T]) loop() {
+	defer p.Close()
 	defer p.wg.Done()
 
 	for {
@@ -167,12 +170,12 @@ func (p *FanoutPipe[D, T]) loop() {
 
 			data, err := p.read()
 			if err != nil {
-				fmt.Printf("pipe error while reading: %v; stopping fanout pipe routine...", err)
+				fmt.Printf("fanout pipe error while reading: %v; stopping fanout pipe routine...", err)
 				return
 			}
 
 			if err := p.write(data); err != nil {
-				fmt.Printf("pipe error while writing: %v", err)
+				fmt.Printf("fanout pipe error while writing: %v", err)
 				continue
 			}
 		}
@@ -207,7 +210,7 @@ func (p *FanoutPipe[D, T]) read() (*Data[D, T], error) {
 }
 
 func (p *FanoutPipe[D, T]) write(data *Data[D, T]) error {
-	p.mux.RLock() // DEAD LOCK
+	p.mux.RLock()
 	defer p.mux.RUnlock()
 
 	writers := p.writers.Values()
@@ -226,7 +229,7 @@ func (p *FanoutPipe[D, T]) write(data *Data[D, T]) error {
 func (p *FanoutPipe[D, T]) Close() error {
 	var err error
 
-	p.once.Do(func() { // DEAD LOCK
+	p.once.Do(func() {
 		if p.cancel != nil {
 			p.cancel()
 		}

@@ -74,8 +74,8 @@ func DefaultServerConfig() *ServerConfig {
 		Port:                    8554,
 		MaxClients:              100,
 		MaxStreams:              10,
-		ReadTimeout:             1 * time.Second,
-		WriteTimeout:            1 * time.Second,
+		ReadTimeout:             0 * time.Second,
+		WriteTimeout:            0 * time.Second,
 		TLSConfig:               nil,
 		PublisherSessionTimeout: 60 * time.Second,
 		ClientSessionTimeout:    60 * time.Second,
@@ -184,6 +184,9 @@ func (m *ServerMetrics) DecrementTotalConnections() {
 	defer m.mux.Unlock()
 
 	m.LastUpdate = time.Now()
+	if m.TotalConnections == 0 {
+		return
+	}
 	m.TotalConnections--
 }
 
@@ -215,6 +218,9 @@ func (m *ServerMetrics) DecrementTotalStreams() {
 	defer m.mux.Unlock()
 
 	m.LastUpdate = time.Now()
+	if m.TotalStreams == 0 {
+		return
+	}
 	m.TotalStreams--
 }
 

@@ -5,6 +5,8 @@ go 1.24
 require (
 	github.com/harshabose/jwtAuth v0.0.0
 	github.com/harshabose/tools/buffer v0.0.0
+	github.com/hashicorp/golang-lru/v2 v2.0.7
+	golang.org/x/time v0.12.0
 )
 
 require (
@@ -13,7 +15,6 @@ require (
 	github.com/coder/websocket v1.8.13 // indirect
 	github.com/emirpasic/gods/v2 v2.0.0-alpha // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/pion/datachannel v1.5.10 // indirect
 	github.com/pion/dtls/v3 v3.0.6 // indirect
 	github.com/pion/ice/v4 v4.0.10 // indirect

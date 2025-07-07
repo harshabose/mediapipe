@@ -1,14 +1,14 @@
 package https
 
 import (
+	"bufio"
 	"context"
-	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,126 +17,6 @@ import (
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"golang.org/x/time/rate"
 )
-
-type ServerState string
-
-const (
-	ServerDown ServerState = "SERVER_OFFLINE"
-	ServerUp   ServerState = "SERVER_ONLINE"
-)
-
-func isLoopBack(remoteAddr string) bool {
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		return false
-	}
-
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return strings.ToLower(host) == "localhost"
-	}
-
-	return ip.IsLoopback()
-}
-
-// BufferedErrors is a fixed-size buffer for storing error messages
-// It will remove the oldest error when the buffer is full
-type BufferedErrors struct {
-	maxSize int
-	errors  []string
-	mux     sync.RWMutex
-}
-
-// NewBufferedErrors creates a new BufferedErrors with the specified maximum size
-func NewBufferedErrors(maxSize int) *BufferedErrors {
-	return &BufferedErrors{
-		maxSize: maxSize,
-		errors:  make([]string, 0, maxSize),
-	}
-}
-
-// Add adds a new error to the buffer, removing the oldest one if the buffer is full
-func (be *BufferedErrors) Add(err string) {
-	be.mux.Lock()
-	defer be.mux.Unlock()
-
-	if len(be.errors) >= be.maxSize {
-		// Remove the oldest error (first element)
-		be.errors = be.errors[1:]
-	}
-
-	// Add the new error
-	be.errors = append(be.errors, err)
-}
-
-// MarshalJSON implements the json.Marshaler interface
-func (be *BufferedErrors) MarshalJSON() ([]byte, error) {
-	be.mux.RLock()
-	defer be.mux.RUnlock()
-
-	return json.Marshal(be.errors)
-}
-
-type health struct {
-	State        ServerState     `json:"state"`
-	RecentErrors *BufferedErrors `json:"recent_errors"`
-	mux          sync.RWMutex
-}
-
-func (h *health) SetState(state ServerState) {
-	h.mux.Lock()
-	defer h.mux.Unlock()
-
-	h.State = state
-}
-
-func (h *health) Marshal() ([]byte, error) {
-	h.mux.RLock()
-	defer h.mux.RUnlock()
-
-	return json.Marshal(h)
-}
-
-// AddError adds an error message to the RecentErrors buffer
-func (h *health) AddError(err string) {
-	h.mux.Lock()
-	defer h.mux.Unlock()
-
-	if h.RecentErrors != nil {
-		h.RecentErrors.Add(err)
-	}
-}
-
-type Config struct {
-	Addr         string        `json:"addr"`
-	Port         uint16        `json:"port"`
-	ReadTimeout  time.Duration `json:"read_timeout"`
-	WriteTimeout time.Duration `json:"write_timeout"`
-	KeepHosting  bool          `json:"keep_hosting"`
-
-	InternalAPIKey  string   `json:"-"`
-	CertPath        string   `json:"-"`
-	KeyFile         string   `json:"-"`
-	TrustedNetworks []string `json:"-"`
-
-	// Rate limiting configuration
-	PublicRateLimit   int `json:"public_rate_limit"`   // requests per minute
-	InternalRateLimit int `json:"internal_rate_limit"` // requests per minute
-	BurstSize         int `json:"burst_size"`
-
-	// CORS configuration
-	AllowedOrigins   []string `json:"allowed_origins"`
-	AllowedMethods   []string `json:"allowed_methods"`
-	AllowedHeaders   []string `json:"allowed_headers"`
-	ExposedHeaders   []string `json:"exposed_headers"` // Headers browsers can access
-	AllowCredentials bool     `json:"allow_credentials"`
-
-	// Security options
-	StrictMode    bool `json:"strict_mode"`    // Enforce strict CORS validation
-	AllowWildcard bool `json:"allow_wildcard"` // Allow "*" origin
-	LogViolations bool `json:"log_violations"` // Log CORS violations
-	MaxAge        int  `json:"max_age"`        // Cache duration for preflight
-}
 
 type Server struct {
 	// auth       *auth.Client
@@ -205,10 +85,14 @@ func (s *Server) Serve() {
 	go s.start()
 }
 
+func (s *Server) ServeAndWait() <-chan struct{} {
+	s.Serve()
+	return s.ctx.Done()
+}
+
 // start starts the prod with the given configuration and listens for clients.
 // This is a blocking call and must be called in a separate goroutine.
 func (s *Server) start() {
-	defer s.Close() // if parent ctx of s.ctx is cancelled
 	defer s.wg.Done()
 	defer s.health.SetState(ServerDown) // Ensure state is set on exit
 
@@ -226,7 +110,6 @@ func (s *Server) start() {
 				err = s.httpServer.ListenAndServe()
 			}
 
-			// Only set down state if there was an actual error
 			if err != nil && !errors.Is(err, http.ErrServerClosed) {
 				s.health.SetState(ServerDown)
 				errMsg := fmt.Sprintf("error while serving: %s", err.Error())
@@ -240,7 +123,6 @@ func (s *Server) start() {
 				fmt.Println("failed to host server, retrying in 5 seconds...")
 				time.Sleep(5 * time.Second)
 			} else {
-				// Graceful shutdown
 				return
 			}
 		}
@@ -275,12 +157,14 @@ func (s *Server) Close() error {
 	var err error = nil
 
 	s.once.Do(func() {
-		s.mux.Lock()
-		defer s.mux.Unlock()
-
 		if s.cancel != nil {
 			s.cancel()
 		}
+
+		s.wg.Wait()
+
+		s.mux.Lock()
+		defer s.mux.Unlock()
 
 		// Give the server 30 seconds to finish existing requests
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -292,8 +176,6 @@ func (s *Server) Close() error {
 				fmt.Printf("error while closing http server: %v", err)
 			}
 		}
-
-		s.wg.Wait()
 	})
 
 	return err
@@ -307,23 +189,21 @@ func (s *Server) Close() error {
 func (s *Server) InternalAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Check API key
-		apiKey := r.Header.Get("X-Internal-API-Key")
-		if apiKey == "" {
-			http.Error(w, "Missing internal API key", http.StatusUnauthorized)
-			return
-		}
-
-		// Use constant-time comparison to prevent timing attacks
-		if subtle.ConstantTimeCompare([]byte(apiKey), []byte(s.config.InternalAPIKey)) != 1 {
-			http.Error(w, "Invalid internal API key", http.StatusUnauthorized)
-			return
-		}
-
-		// Optional: Check if request comes from trusted network
-		clientIP := s.getClientIP(r)
-		if !s.isInternalIP(clientIP) {
-			log.Printf("⚠️  Internal API access from external IP: %s", clientIP)
-		}
+		// apiKey := r.Header.Get("X-Internal-API-Key")
+		// if apiKey == "" {
+		// 	http.Error(w, "Missing internal API key", http.StatusUnauthorized)
+		// 	return
+		// }
+		//
+		// if subtle.ConstantTimeCompare([]byte(apiKey), []byte(s.config.InternalAPIKey)) != 1 {
+		// 	http.Error(w, "Invalid internal API key", http.StatusUnauthorized)
+		// 	return
+		// }
+		//
+		// clientIP := s.getClientIP(r)
+		// if !s.isInternalIP(clientIP) {
+		// 	log.Printf("⚠️  Internal API access from external IP: %s", clientIP)
+		// }
 
 		next.ServeHTTP(w, r)
 	}
@@ -344,10 +224,8 @@ func (s *Server) AuthMiddlewareWithRequiredRoomExtraction(next http.HandlerFunc,
 // RateLimitMiddleware Rate limiting middleware
 func (s *Server) RateLimitMiddleware(next http.HandlerFunc, isPublic bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Get client identifier (IP address)
 		clientIP := s.getClientIP(r)
 
-		// Determine rate limit
 		var limit rate.Limit
 		var burst int
 
@@ -359,7 +237,6 @@ func (s *Server) RateLimitMiddleware(next http.HandlerFunc, isPublic bool) http.
 			burst = s.config.BurstSize * 2                      // Higher burst for internal
 		}
 
-		// Get or create rate limiter for this client
 		s.rateLimiterMux.Lock()
 		limiter, exists := s.rateLimiters.Get(clientIP)
 		if !exists {
@@ -368,7 +245,6 @@ func (s *Server) RateLimitMiddleware(next http.HandlerFunc, isPublic bool) http.
 		}
 		s.rateLimiterMux.Unlock()
 
-		// Check rate limit
 		if !limiter.Allow() {
 			w.Header().Set("X-RateLimit-Limit", strconv.Itoa(int(limit*60)))
 			w.Header().Set("X-RateLimit-Remaining", "0")
@@ -378,7 +254,6 @@ func (s *Server) RateLimitMiddleware(next http.HandlerFunc, isPublic bool) http.
 			return
 		}
 
-		// Add rate limit headers
 		w.Header().Set("X-RateLimit-Limit", strconv.Itoa(int(limit*60)))
 		w.Header().Set("X-RateLimit-Remaining", strconv.FormatFloat(limiter.TokensAt(time.Now()), 'f', -1, 64))
 
@@ -390,25 +265,21 @@ func (s *Server) CorsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 
-		// Check origin
 		originAllowed := s.isOriginAllowed(origin)
 
-		if r.Method == "OPTIONS" {
-			// Handle preflight
+		if r.Method == http.MethodOptions {
 			if !s.handlePreflight(w, r, originAllowed) {
 				return
 			}
 		} else {
-			// Handle actual request
 			if !s.handleActualRequest(w, r, originAllowed) {
 				return
 			}
 		}
 
-		// Set CORS headers
 		s.setCORSHeaders(w, origin, originAllowed)
 
-		if r.Method == "OPTIONS" {
+		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -422,10 +293,12 @@ func (s *Server) isOriginAllowed(origin string) bool {
 		return true // Same-origin requests
 	}
 
+	// nil and * are treated the same
+	if (s.config.AllowedOrigins == nil || slices.Contains(s.config.AllowedOrigins, "*")) && s.config.AllowWildcard {
+		return true
+	}
+
 	for _, allowedOrigin := range s.config.AllowedOrigins {
-		if allowedOrigin == "*" && s.config.AllowWildcard {
-			return true
-		}
 		if allowedOrigin == origin {
 			return true
 		}
@@ -486,32 +359,38 @@ func (s *Server) handleActualRequest(w http.ResponseWriter, r *http.Request, ori
 }
 
 func (s *Server) setCORSHeaders(w http.ResponseWriter, origin string, originAllowed bool) {
-	if originAllowed {
-		if origin != "" {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-		}
+	if !originAllowed {
+		w.Header().Add("Vary", "Origin")
+		return
 	}
 
-	w.Header().Set("Access-Control-Allow-Methods", strings.Join(s.config.AllowedMethods, ", "))
-	w.Header().Set("Access-Control-Allow-Headers", strings.Join(s.config.AllowedHeaders, ", "))
+	if origin != "" {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+	}
 
-	if s.config.AllowCredentials && originAllowed && origin != "" {
+	if s.config.AllowedMethods != nil {
+		w.Header().Set("Access-Control-Allow-Methods", strings.Join(s.config.AllowedMethods, ", "))
+	} else {
+		w.Header().Set("Access-Control-Allow-Methods", "*")
+	}
+	if s.config.AllowedHeaders != nil {
+		w.Header().Set("Access-Control-Allow-Headers", strings.Join(s.config.AllowedHeaders, ", "))
+	} else {
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+	}
+
+	if s.config.AllowCredentials && origin != "" {
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
 	}
 
 	// Set cache duration
 	maxAge := s.config.MaxAge
-	if maxAge == 0 {
-		maxAge = 86400 // Default 24 hours
-	}
 	w.Header().Set("Access-Control-Max-Age", strconv.Itoa(maxAge))
 
-	// Set exposed headers (headers that browser JS can access)
-	if len(s.config.ExposedHeaders) > 0 {
+	if s.config.ExposedHeaders != nil && len(s.config.ExposedHeaders) > 0 {
 		w.Header().Set("Access-Control-Expose-Headers", strings.Join(s.config.ExposedHeaders, ", "))
 	}
 
-	// Vary headers for proper caching
 	w.Header().Add("Vary", "Origin")
 	w.Header().Add("Vary", "Access-Control-Request-Method")
 	w.Header().Add("Vary", "Access-Control-Request-Headers")
@@ -520,6 +399,10 @@ func (s *Server) setCORSHeaders(w http.ResponseWriter, origin string, originAllo
 func (s *Server) isMethodAllowed(method string) bool {
 	if method == "" {
 		return false
+	}
+
+	if s.config.AllowedMethods == nil {
+		return true
 	}
 
 	for _, allowedMethod := range s.config.AllowedMethods {
@@ -535,12 +418,16 @@ func (s *Server) areHeadersAllowed(requestedHeaders string) bool {
 		return true
 	}
 
+	if s.config.AllowedHeaders == nil {
+		return true
+	}
+
 	// Headers that are always allowed (CORS-safe-listed headers)
 	safeHeaders := map[string]bool{
 		"accept":           true,
 		"accept-language":  true,
 		"content-language": true,
-		"content-type":     true, // with restrictions, but we'll allow it
+		"content-type":     true,
 	}
 
 	headers := strings.Split(requestedHeaders, ",")
@@ -619,12 +506,11 @@ func (s *Server) getClientIP(r *http.Request) string {
 		}
 	}
 
-	// Check X-Real-IP header (from Nginx)
+	// Check X-Real-IP header (from Nginx/Traefik/etc)
 	if xri := r.Header.Get("X-Real-IP"); xri != "" {
 		return xri
 	}
 
-	// Fall back to RemoteAddr
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
@@ -633,7 +519,10 @@ func (s *Server) getClientIP(r *http.Request) string {
 }
 
 func (s *Server) isInternalIP(ip string) bool {
-	// Check if IP is in trusted networks
+	if s.config.TrustedNetworks == nil {
+		return true
+	}
+
 	for _, network := range s.config.TrustedNetworks {
 		if _, ipNet, err := net.ParseCIDR(network); err == nil {
 			if ipNet.Contains(net.ParseIP(ip)) {
@@ -642,7 +531,6 @@ func (s *Server) isInternalIP(ip string) bool {
 		}
 	}
 
-	// Check for localhost
 	if isLoopBack(ip) {
 		return true
 	}
@@ -650,13 +538,45 @@ func (s *Server) isInternalIP(ip string) bool {
 	return false
 }
 
-// Response writer wrapper to capture status code
 type responseWriter struct {
 	http.ResponseWriter
-	statusCode int
+	statusCode    int
+	headerWritten bool
 }
 
 func (rw *responseWriter) WriteHeader(code int) {
+	if rw.headerWritten {
+		return
+	}
+	rw.headerWritten = true
 	rw.statusCode = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := rw.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("responseWriter does not support hijacking")
+	}
+	return hijacker.Hijack()
+}
+
+func (rw *responseWriter) Write(data []byte) (int, error) {
+	if !rw.headerWritten {
+		rw.WriteHeader(200)
+	}
+	return rw.ResponseWriter.Write(data)
+}
+
+func (rw *responseWriter) Flush() {
+	if flusher, ok := rw.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (rw *responseWriter) Push(target string, opts *http.PushOptions) error {
+	if pusher, ok := rw.ResponseWriter.(http.Pusher); ok {
+		return pusher.Push(target, opts)
+	}
+	return errors.New("push not supported")
 }

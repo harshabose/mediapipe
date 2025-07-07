@@ -28,8 +28,8 @@
 //	    Username: "user",
 //	    Password: "pass",
 //	    MessageType: websocket.MessageBinary,
-//	    ReadBufferSize:  32768,  // 32KB, 0 = use max uint16
-//	    WriteBufferSize: 32768,  // 32KB, 0 = use max uint16
+//	    ReadTimeout:  32768,  // 32KB, 0 = use max uint16
+//	    WriteTimeout: 32768,  // 32KB, 0 = use max uint16
 //	    MaxRetry:       5,
 //	    ReconnectDelay: 5 * time.Second,
 //	}
@@ -91,8 +91,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/harshabose/mediasink/pkg/ioreader"
-	"github.com/harshabose/mediasink/pkg/iowriter"
+	mediapipe "github.com/harshabose/mediasink"
 )
 
 // ClientState represents the current operational state of the client connection.
@@ -426,23 +425,64 @@ type ClientConfig struct {
 	// Connection settings
 	Addr string // WebSocket server address (e.g., "wss://example.com")
 	Port uint16 // WebSocket server port
+	Path string
 
 	// Authentication settings
-	AuthURL  string // Authentication service URL for login
-	Username string // Username for authentication
-	Password string // Password for authentication
+	// AuthURL  string // Authentication service URL for login
+	// Username string // Username for authentication
+	// Password string // Password for authentication
 
 	// WebSocket protocol settings
 	MessageType websocket.MessageType // Type of WebSocket messages (Binary/Text)
 
 	// Buffer configuration
-	ReadBufferSize  uint32 // Maximum read buffer size (0 = use max uint16 ~64KB)
-	WriteBufferSize uint32 // Maximum write buffer size (0 = use max uint16 ~64KB)
+	ReadTimeout  time.Duration // Maximum read buffer size (0 = use max uint16 ~64KB)
+	WriteTimeout time.Duration // Maximum write buffer size (0 = use max uint16 ~64KB)
 
 	// Connection management
 	KeepConnecting bool          // Whether to maintain persistent connection
 	MaxRetry       uint8         // Maximum reconnection attempts (0 = unlimited)
 	ReconnectDelay time.Duration // Initial delay between reconnection attempts
+	// PingTimeout    time.Duration // PingTimeout specifies the duration to wait for a loop response before considering the connection dead.
+}
+
+func (c *ClientConfig) updateDelay() {
+	newDelay := time.Duration(float64(c.ReconnectDelay) * 1.5)
+	if newDelay > 30*time.Second {
+		newDelay = 30 * time.Second
+	}
+	c.ReconnectDelay = newDelay
+}
+
+func (c *ClientConfig) shouldRetry(attempt uint8) bool {
+	if !c.KeepConnecting {
+		fmt.Println("Not retrying as not configured to reconnect")
+		return false
+	}
+
+	if c.MaxRetry == 0 {
+		fmt.Printf("No retries configured, stopping connection attempts\n")
+		return false
+	}
+
+	if c.MaxRetry > 0 && attempt >= c.MaxRetry {
+		fmt.Printf("Maximum retry attempts (%d) reached, stopping\n", c.MaxRetry)
+		return false
+	}
+
+	return true
+}
+
+func (c *ClientConfig) waitForRetry(ctx context.Context, attempt uint8) bool {
+	fmt.Printf("Retrying Websocket connection in %v (attempt %d)\n", c.ReconnectDelay, attempt+1)
+
+	select {
+	case <-ctx.Done():
+		fmt.Printf("Websocket connection manager stopping during retry delay\n")
+		return false
+	case <-time.After(c.ReconnectDelay):
+		return true
+	}
 }
 
 // Client represents a WebSocket client with automatic reconnection, authentication,
@@ -466,8 +506,8 @@ type Client struct {
 
 	config ClientConfig // Client configuration parameters
 
-	reader *ioreader.Reader // WebSocket reader adapter for media pipeline
-	writer *iowriter.Writer // WebSocket writer adapter for media pipeline
+	reader mediapipe.CanGenerate[[]byte] // WebSocket reader adapter for media pipeline
+	writer mediapipe.CanConsume[[]byte]  // WebSocket writer adapter for media pipeline
 
 	metrics *ClientMetrics // Operational metrics and statistics
 
@@ -526,13 +566,21 @@ func NewClient(ctx context.Context, config ClientConfig) *Client {
 	return c
 }
 
+func (c *Client) Connect() {
+	c.wg.Add(1)
+	go c.connect()
+
+	fmt.Printf("attempting connection to %s:%d%s\n", c.config.Addr, c.config.Port, c.config.Path)
+
+}
+
 // Connect initiates the WebSocket connection in a background goroutine.
 // This method returns immediately while connection establishment proceeds
 // asynchronously with automatic retry logic.
 //
 //  1. Authentication with the configured auth service
 //  2. WebSocket connection establishment
-//  3. Reader/writer setup for media pipeline integration
+//  3. ReaderWriter/writer setup for media pipeline integration
 //  4. Connection health monitoring
 //  5. Automatic reconnection on failures
 //  5. Automatic reconnection on failures
@@ -543,9 +591,13 @@ func NewClient(ctx context.Context, config ClientConfig) *Client {
 //
 // This method is safe to call multiple times - subsequent calls are ignored
 // if a connection process is already running.
-func (c *Client) Connect() {
-	c.wg.Add(1)
-	go c.connect()
+func (c *Client) ConnectAndWait() <-chan struct{} {
+	c.Connect()
+	return c.ctx.Done()
+}
+
+func (c *Client) Wait() <-chan struct{} {
+	return c.ctx.Done()
 }
 
 // connect implements the main connection management loop with exponential backoff retry.
@@ -556,8 +608,6 @@ func (c *Client) connect() {
 	defer c.metrics.SetState(ClientStateDisconnected)
 
 	var attempt uint8 = 0
-	currentDelay := c.config.ReconnectDelay
-	maxAttempts := c.config.MaxRetry
 
 	for {
 		select {
@@ -568,43 +618,46 @@ func (c *Client) connect() {
 			c.metrics.SetState(ClientStateConnecting)
 			fmt.Printf("Attempting to connect to websocket server: %s\n", c.config.Addr)
 
-			if err := c.attemptConnection(); err != nil {
+			_, err := c.attemptConnection()
+			if err != nil {
 				c.metrics.SetState(ClientStateError)
 				c.metrics.AddErrors(err)
-
 				fmt.Printf("Websocket connection failed: %v\n", err)
 
-				if maxAttempts == 0 {
-					fmt.Printf("No retries configured, stopping connection attempts\n")
+				if !c.config.shouldRetry(attempt) {
 					return
 				}
 
-				if maxAttempts > 0 && attempt >= maxAttempts {
-					fmt.Printf("Maximum retry attempts (%d) reached, stopping\n", maxAttempts)
+				if !c.config.waitForRetry(c.ctx, attempt) {
 					return
 				}
 
-				fmt.Printf("Retrying Websocket connection in %v (attempt %d)\n", currentDelay, attempt+1)
-				select {
-				case <-c.ctx.Done():
-					fmt.Printf("Websocket connection manager stopping during retry delay\n")
-					return
-				case <-time.After(currentDelay):
-					// Exponential backoff with cap
-					currentDelay = time.Duration(float64(currentDelay) * 1.5)
-					if currentDelay > 30*time.Second {
-						currentDelay = 30 * time.Second
-					}
+				c.config.updateDelay()
 
-					attempt++
-					continue
-				}
+				attempt++
+				continue
 			}
 
+			// Connection successful
 			c.metrics.SetState(ClientStateConnected)
 			fmt.Printf("Websocket connection established to: %s\n", c.config.Addr)
 
+			fmt.Println("Starting connection monitor...")
 			c.monitorConnection()
+
+			// Connection lost - reset for retry
+			fmt.Printf("Connection lost; preparing to retry (attempt %d)\n", attempt+1)
+
+			if !c.config.shouldRetry(attempt) {
+				return
+			}
+
+			if !c.config.waitForRetry(c.ctx, attempt) {
+				return
+			}
+
+			c.config.updateDelay()
+			attempt++
 		}
 	}
 }
@@ -612,19 +665,19 @@ func (c *Client) connect() {
 // monitorConnection runs connection health monitoring in a loop.
 // It checks for connection staleness and handles reconnection signals.
 func (c *Client) monitorConnection() {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
+	writesTicker := time.NewTicker(5 * time.Second)
+	defer writesTicker.Stop()
 
 	for {
 		select {
 		case <-c.ctx.Done():
 			return
 		case <-c.reconnect:
+			fmt.Println("Triggered websocket reconnection due to some error")
 			return
-		case <-ticker.C:
+		case <-writesTicker.C:
 			if time.Since(c.metrics.GetLastWriteTime()) > 60*time.Second || time.Since(c.metrics.GetLastReadTime()) > 60*time.Second {
 				fmt.Printf("socket connection appears stale (no writes and/or read for 60s)\n")
-				// Log warning but continue - write/read errors will trigger reconnection
 			}
 		}
 	}
@@ -632,10 +685,10 @@ func (c *Client) monitorConnection() {
 
 // attemptConnection performs a single connection attempt including authentication
 // and WebSocket establishment. Returns an error if any step fails.
-func (c *Client) attemptConnection() error {
-	if err := c.performLogin(); err != nil {
-		return err
-	}
+func (c *Client) attemptConnection() (*websocket.Conn, error) {
+	// if err := c.performLogin(); err != nil {
+	// 	return nil, err
+	// }
 
 	// token, ok := c.auth.GetCurrentToken()
 	// if !ok {
@@ -647,43 +700,33 @@ func (c *Client) attemptConnection() error {
 	// 	return err
 	// }
 
-	conn, _, err := websocket.Dial(c.ctx, fmt.Sprintf("%s:%d", c.config.Addr, c.config.Port), nil)
+	url := fmt.Sprintf("%s:%d%s", c.config.Addr, c.config.Port, c.config.Path)
+	conn, _, err := websocket.Dial(c.ctx, url, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	_, r, err := conn.Reader(c.ctx)
-	if err != nil {
-		return err
+	fmt.Println("dail success")
+
+	if err := c.setReaderWriter(conn); err != nil {
+		return nil, err
 	}
 
-	reader, err := ioreader.NewReader(r, c.config.ReadBufferSize)
-	if err != nil {
-		return err
-	}
-
-	w, err := conn.Writer(c.ctx, c.config.MessageType)
-	if err != nil {
-		return err
-	}
-
-	writer, err := iowriter.NewWriter(w, c.config.WriteBufferSize)
-	if err != nil {
-		return err
-	}
-
-	c.setReaderWriter(reader, writer)
-	return nil
+	return conn, err
 }
 
 // setReaderWriter atomically updates the client's reader and writer.
 // This method is thread-safe and ensures consistent reader/writer state.
-func (c *Client) setReaderWriter(reader *ioreader.Reader, writer *iowriter.Writer) {
+func (c *Client) setReaderWriter(conn *websocket.Conn) error {
+	rw := NewSocketReaderWriter(c.ctx, conn, c.config.MessageType, c.config.ReadTimeout, c.config.WriteTimeout)
+
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
-	c.reader = reader
-	c.writer = writer
+	c.reader = rw
+	c.writer = rw
+
+	return nil
 }
 
 // Generate implements the CanGenerate[[]byte] interface, allowing the client
@@ -714,7 +757,8 @@ func (c *Client) Generate() ([]byte, error) {
 		if c.metrics.GetState() != ClientStateConnected {
 			err := fmt.Errorf("cannot transmit data: client state is %s, expected %s (connected)", c.metrics.GetState().String(), ClientStateConnected.String())
 			c.metrics.AddErrors(err)
-			return nil, err
+			fmt.Println(err.Error())
+			return nil, nil
 		}
 
 		c.mux.RLock()
@@ -723,7 +767,8 @@ func (c *Client) Generate() ([]byte, error) {
 		if c.reader == nil {
 			err := errors.New("reader not ready yet")
 			c.metrics.AddErrors(err)
-			return nil, err
+			fmt.Println(err.Error())
+			return nil, nil
 		}
 
 		data, err := c.reader.Generate()
@@ -733,7 +778,6 @@ func (c *Client) Generate() ([]byte, error) {
 
 			select {
 			case c.reconnect <- struct{}{}:
-				fmt.Printf("Triggered websocket reconnection due to read error\n")
 			default:
 				// Channel full, reconnection already pending
 			}
@@ -777,14 +821,18 @@ func (c *Client) Consume(data []byte) error {
 		if c.metrics.GetState() != ClientStateConnected {
 			err := fmt.Errorf("cannot transmit data: client state is %d, expected %d (connected)", c.metrics.GetState(), ClientStateConnected)
 			c.metrics.AddErrors(err)
-			return err
+			fmt.Println(err.Error())
+			return nil
 		}
 
 		c.mux.RLock()
 		defer c.mux.RUnlock()
 
 		if c.writer == nil {
-			return errors.New("writer not ready yet")
+			err := errors.New("writer not ready yet")
+			c.metrics.AddErrors(err)
+			fmt.Println(err.Error())
+			return nil
 		}
 
 		if err := c.writer.Consume(data); err != nil {
@@ -793,7 +841,6 @@ func (c *Client) Consume(data []byte) error {
 
 			select {
 			case c.reconnect <- struct{}{}:
-				fmt.Printf("Triggered websocket reconnection due to write error\n")
 			default:
 				// Channel full, reconnection already pending
 			}
@@ -832,17 +879,17 @@ func (c *Client) GetMetrics() map[string]interface{} {
 
 // performLogin authenticates with the configured auth service and obtains
 // JWT tokens for WebSocket authentication.
-func (c *Client) performLogin() error {
-	// ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
-	// defer cancel()
-	//
-	// _, err := c.auth.Login(ctx, c.config.Username, c.config.Password)
-	// if err != nil {
-	// 	return err
-	// }
-
-	return nil
-}
+// func (c *Client) performLogin() error {
+// 	// ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
+// 	// defer cancel()
+// 	//
+// 	// _, err := c.auth.Login(ctx, c.config.Username, c.config.Password)
+// 	// if err != nil {
+// 	// 	return err
+// 	// }
+//
+// 	return nil
+// }
 
 // Close gracefully shuts down the client and cleans up all resources.
 // This method is safe to call multiple times and from multiple goroutines.

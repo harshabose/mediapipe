@@ -159,6 +159,10 @@ func NewIdentityAnyWriter[D any](consumer CanConsume[D]) *AnyWriter[D, D] {
 // when Get() is called, maintaining the efficiency benefits of the lazy
 // evaluation system throughout the entire pipeline.
 func (w *AnyWriter[D, T]) Write(data *Data[D, T]) error {
+	if data == nil {
+		return nil
+	}
+
 	d, err := data.Get()
 	if err != nil {
 		return err

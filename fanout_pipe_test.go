@@ -493,6 +493,7 @@ func TestFanoutPipe_CloseWithErrors(t *testing.T) {
 	err := pipe.Close()
 	if err == nil {
 		t.Error("Close should return error when components fail to close")
+		return
 	}
 
 	// Should contain both errors

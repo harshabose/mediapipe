@@ -2,9 +2,9 @@ package loopback
 
 import "net"
 
-type Option[T any] = func(*LoopBack[T]) error
+type Option = func(*LoopBack) error
 
-func WithRandomBindPort[T any](loopback *LoopBack[T]) error {
+func WithRandomBindPort[T any](loopback *LoopBack) error {
 	var err error
 	if loopback.bindPort, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0}); err != nil {
 		return err
@@ -13,8 +13,8 @@ func WithRandomBindPort[T any](loopback *LoopBack[T]) error {
 	return nil
 }
 
-func WithBindPort[T any](port int) Option[T] {
-	return func(loopback *LoopBack[T]) error {
+func WithBindPort[T any](port int) Option {
+	return func(loopback *LoopBack) error {
 		var err error
 		if loopback.bindPort, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port}); err != nil {
 			return err
@@ -23,8 +23,8 @@ func WithBindPort[T any](port int) Option[T] {
 	}
 }
 
-func WithLoopBackPort[T any](port int) Option[T] {
-	return func(loopback *LoopBack[T]) error {
+func WithLoopBackPort[T any](port int) Option {
+	return func(loopback *LoopBack) error {
 		loopback.remote = &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port}
 		return nil
 	}
