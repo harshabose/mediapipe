@@ -8,7 +8,7 @@ import (
 
 	"github.com/emirpasic/gods/v2/sets/hashset"
 
-	"github.com/harshabose/mediasink/internal/utils/multierr"
+	"github.com/harshabose/mediapipe/internal/utils/multierr"
 )
 
 type writerWrap[D, T any] struct {
@@ -103,10 +103,12 @@ func NewFanoutPipe[D, T any](ctx context.Context, reader Reader[D, T], writers .
 	}
 	p.pauseCond = sync.NewCond(&p.mux)
 
+	return p
+}
+
+func (p *FanoutPipe[D, T]) Start() {
 	p.wg.Add(1)
 	go p.loop()
-
-	return p
 }
 
 func (p *FanoutPipe[D, T]) Wait() <-chan struct{} {

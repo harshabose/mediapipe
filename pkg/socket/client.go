@@ -91,7 +91,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	mediapipe "github.com/harshabose/mediasink"
+	mediapipe "github.com/harshabose/mediapipe"
 )
 
 // ClientState represents the current operational state of the client connection.
@@ -376,9 +376,8 @@ func (m *ClientMetrics) AddErrors(errs ...error) {
 	}
 }
 
-// GetMetrics returns a snapshot of all current metrics in a JSON-serializable format.
-// This method is thread-safe and provides a point-in-time view of the client's
-// operational statistics, suitable for monitoring dashboards and diagnostic tools.
+// GetMetrics returns a snapshot of all current metrics in a JSON-serialisable format.
+// thread-safe.
 //
 // Returns:
 //   - map[string]interface{}: Complete metrics snapshot with keys:
@@ -415,7 +414,7 @@ func (m *ClientMetrics) GetMetrics() map[string]interface{} {
 }
 
 // ClientConfig contains all configuration parameters for the WebSocket client.
-// This includes connection details, authentication credentials, buffer sizes,
+// This includes connection details, authentication credentials, io timeouts,
 // and retry behavior.
 //
 // Note: AccessToken is transmitted via query parameter for maximum client compatibility,
@@ -427,7 +426,7 @@ type ClientConfig struct {
 	Port uint16 // WebSocket server port
 	Path string
 
-	// Authentication settings
+	// Authentication settings // NOT IMPLEMENTED FOR NOW
 	// AuthURL  string // Authentication service URL for login
 	// Username string // Username for authentication
 	// Password string // Password for authentication
@@ -440,10 +439,9 @@ type ClientConfig struct {
 	WriteTimeout time.Duration // Maximum write buffer size (0 = use max uint16 ~64KB)
 
 	// Connection management
-	KeepConnecting bool          // Whether to maintain persistent connection
+	KeepConnecting bool          // Whether to maintain a persistent connection
 	MaxRetry       uint8         // Maximum reconnection attempts (0 = unlimited)
 	ReconnectDelay time.Duration // Initial delay between reconnection attempts
-	// PingTimeout    time.Duration // PingTimeout specifies the duration to wait for a loop response before considering the connection dead.
 }
 
 func (c *ClientConfig) updateDelay() {

@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 
-	"github.com/harshabose/mediasink/pkg/rtsp"
+	"github.com/harshabose/mediapipe/pkg/rtsp"
 )
 
 /* EXAMPLE INPUT

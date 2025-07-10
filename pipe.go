@@ -41,7 +41,8 @@ import (
 //
 // All pipe implementations should support pausing and resuming data flow
 // without losing data or corrupting the pipeline state.
-type Pipe interface {
+type Pipe[D, T any] interface {
+	Start()
 	// Pause temporarily stops data flow through the pipe.
 	// Buffered data is preserved and will be processed when resumed.
 	// Multiple calls to Pause() are safe and idempotent.
@@ -123,10 +124,41 @@ func NewAnyPipe[D, T any](ctx context.Context, reader Reader[D, T], writer Write
 	}
 	p.pauseCond = sync.NewCond(p.mux.RLocker())
 
+	return p
+}
+
+func (p *AnyPipe[D, T]) Start() {
 	p.wg.Add(1)
 	go p.loop()
+}
 
-	return p
+func (p *AnyPipe[D, T]) AddWriter(writer Writer[D, T]) (context.Context, context.CancelFunc) {
+	p.mux.Lock()
+	defer p.mux.Unlock()
+
+	if p.writer != nil {
+		if err := p.writer.Close(); err != nil {
+			// TODO: SHOULD I CLOS HERE OR NO?
+		}
+	}
+
+	p.writer = writer
+	return nil, nil
+}
+
+func (p *AnyPipe[D, T]) AddReader(reader Reader[D, T]) (context.Context, context.CancelFunc) {
+	p.mux.Lock()
+	defer p.mux.Unlock()
+
+	if p.reader != nil {
+		if err := p.reader.Close(); err != nil {
+			// TODO: SHOULD I CLOS HERE OR NO?
+		}
+	}
+
+	p.reader = reader
+
+	return nil, nil
 }
 
 func (p *AnyPipe[D, T]) Pause() {

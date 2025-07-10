@@ -9,7 +9,7 @@ import (
 
 	"github.com/emirpasic/gods/v2/sets/linkedhashset"
 
-	"github.com/harshabose/mediasink/internal/utils/multierr"
+	"github.com/harshabose/mediapipe/internal/utils/multierr"
 )
 
 type readerWrap[D, T any] struct {
@@ -105,10 +105,12 @@ func NewMergePipe[D, T any](ctx context.Context, writer Writer[D, T], readers ..
 	}
 	p.pauseCond = sync.NewCond(&p.mux)
 
+	return p
+}
+
+func (p *MergePipe[D, T]) Start() {
 	p.wg.Add(1)
 	go p.loop()
-
-	return p
 }
 
 func (p *MergePipe[D, T]) AddReader(r Reader[D, T]) (context.Context, context.CancelFunc) {

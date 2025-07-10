@@ -3,7 +3,7 @@ package pkg
 import (
 	"fmt"
 
-	mediapipe "github.com/harshabose/mediasink"
+	mediapipe "github.com/harshabose/mediapipe"
 )
 
 type MockReaderWriter struct{}

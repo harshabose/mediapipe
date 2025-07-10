@@ -356,11 +356,18 @@ func NewClient(ctx context.Context, config *ClientConfig, des *description.Sessi
 
 	fmt.Printf("RTSP client configured for URL: %s\n", client.rtspURL)
 
-	// Serve background connection management
-	client.wg.Add(1)
-	go client.connect()
-
 	return client, nil
+}
+
+func (c *Client) Start() {
+	// Serve background connection management
+	c.wg.Add(1)
+	go c.connect()
+}
+
+func (c *Client) StartAndWait() <-chan struct{} {
+	c.connect()
+	return c.ctx.Done()
 }
 
 // connect manages the client's connection lifecycle in a background goroutine.
@@ -563,8 +570,8 @@ func (c *Client) Consume(packet *rtp.Packet) error {
 	// Verify client is in an operational state
 	state := c.metrics.GetState()
 	if state != ClientStateRecording {
-		return fmt.Errorf("cannot transmit packet: client state is %d, expected %d (recording)",
-			state, ClientStateRecording)
+		fmt.Printf("cannot transmit packet: client state is %d, expected %d (recording)\n", state, ClientStateRecording)
+		return nil
 	}
 
 	c.mux.RLock()
@@ -601,7 +608,8 @@ func (c *Client) Consume(packet *rtp.Packet) error {
 			// Channel full, reconnection already pending
 		}
 
-		return fmt.Errorf("failed to write RTP packet to RTSP server: %w", err)
+		fmt.Printf("failed to write RTP packet to RTSP server: %v\n", err)
+		return nil
 	}
 
 	// Update success ClientMetrics

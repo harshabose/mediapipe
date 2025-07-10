@@ -11,7 +11,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/harshabose/mediasink/pkg/https"
+	"github.com/harshabose/mediapipe/pkg/https"
 )
 
 func TestMetrics(t *testing.T) {

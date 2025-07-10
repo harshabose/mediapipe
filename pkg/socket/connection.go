@@ -8,7 +8,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/harshabose/mediasink"
+	"github.com/harshabose/mediapipe"
 )
 
 type Connection struct {

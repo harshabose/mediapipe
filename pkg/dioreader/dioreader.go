@@ -1,6 +1,7 @@
-package ioreader
+package dioreader
 
 import (
+	"errors"
 	"io"
 
 	"github.com/pion/webrtc/v4"
@@ -139,28 +140,47 @@ func NewReader(reader io.Reader, size uint16) *Reader {
 	}
 }
 
-// Generate implements the CanGenerate[[]byte] interface by reading all available data
+// Generate implements the CanGenerate[[]byte] interface by reading a single message
 // from the underlying io.Reader up to the configured buffer size limit.
 //
-// This method uses io.ReadAll with io.LimitReader to ensure memory safety while
-// reading from potentially unlimited data sources. The read operation will continue
-// until either:
-//   - EOF is reached on the underlying reader
-//   - The buffer size limit is reached
-//   - An error occurs during reading
+// This method reads exactly one discrete message from the underlying reader, which is
+// particularly important for message-based protocols like WebRTC DataChannels where
+// each Read() operation should return one complete message.
 //
-// The buffer size limit prevents memory exhaustion attacks or unintentional resource
-// consumption when connected to data sources that might provide unlimited data streams.
+// For DataChannels, this method will:
+//   - Read one complete message per call
+//   - Handle short buffer errors by retrying with a larger buffer
+//   - Return the exact message content without truncation
 //
-// For network connections, this method will block until data is available or the
-// connection is closed. For file handles, it will read until EOF or the size limit.
-// For interactive sources like stdin, it will read until a newline or the size limit.
+// For stream-based readers (files, network streams), this method will:
+//   - Read up to the buffer size limit
+//   - Return whatever data is available
+//   - May return partial data if less than buffer size is available
+//
+// The method handles io.ErrShortBuffer by automatically retrying with a larger buffer,
+// ensuring that messages larger than the initial buffer size can still be read successfully.
 //
 // Returns:
-//   - []byte: All data read from the underlying reader (up to size limit)
+//   - []byte: The complete message or data read from the underlying reader
 //   - error: Any error that occurred during reading, including io.EOF
 func (r *Reader) Generate() ([]byte, error) {
-	return io.ReadAll(io.LimitReader(r.r, int64(r.size)))
+	buffer := make([]byte, r.size)
+	n, err := r.r.Read(buffer)
+	if err == nil {
+		return buffer[:n], nil
+	}
+
+	// Handle short buffer by retrying with larger buffer
+	if errors.Is(err, io.ErrShortBuffer) {
+		buffer = make([]byte, r.size*2) // Try with double the size
+		n, err = r.r.Read(buffer)
+		if err != nil {
+			return nil, err
+		}
+		return buffer[:n], nil
+	}
+
+	return nil, err
 }
 
 // Close closes the underlying reader if it implements io.Closer.

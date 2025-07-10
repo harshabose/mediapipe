@@ -211,7 +211,12 @@ func (l *LoopBack) write(payload []byte) error {
 }
 
 func (l *LoopBack) Generate() ([]byte, error) {
-	return l.read()
+	data, err := l.read()
+	if err != nil {
+		return nil, fmt.Errorf("ERROR: loopback failed to generate; err: %w", err)
+	}
+
+	return data, nil
 }
 
 func (l *LoopBack) read() ([]byte, error) {

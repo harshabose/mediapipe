@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/harshabose/mediasink/pkg/https"
-	"github.com/harshabose/mediasink/pkg/socket"
+	"github.com/harshabose/mediapipe/pkg/https"
+	"github.com/harshabose/mediapipe/pkg/socket"
 )
 
 func main() {

@@ -6,9 +6,9 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/harshabose/mediasink"
-	"github.com/harshabose/mediasink/pkg/loopback"
-	"github.com/harshabose/mediasink/pkg/socket"
+	"github.com/harshabose/mediapipe"
+	"github.com/harshabose/mediapipe/pkg/loopback"
+	"github.com/harshabose/mediapipe/pkg/socket"
 )
 
 func main() {
@@ -22,8 +22,8 @@ func main() {
 	wl := mediapipe.NewIdentityAnyWriter[[]byte](l)
 
 	client := socket.NewClient(context.Background(), socket.ClientConfig{
-		Addr:           "wss://socket.skyline-sonata.in",
-		Port:           443,
+		Addr:           "ws://localhost",
+		Port:           8080,
 		Path:           "/ws/write/desh/5gfpv",
 		MessageType:    websocket.MessageBinary,
 		ReadTimeout:    10 * time.Minute,
