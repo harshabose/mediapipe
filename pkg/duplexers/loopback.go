@@ -18,7 +18,7 @@ type LoopBack struct {
 	mu sync.RWMutex // Protects concurrent access to connection state
 }
 
-func NewLoopBack(ctx context.Context, bindAddr string, options ...Option) (*LoopBack, error) {
+func NewLoopBack(ctx context.Context, bindAddr string, options ...LoopBackOption) (*LoopBack, error) {
 	addr, err := net.ResolveUDPAddr("udp", bindAddr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve bind address: %v", err)

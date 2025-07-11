@@ -13,7 +13,7 @@ import (
 	"github.com/pion/rtp"
 )
 
-type ClientConfig struct {
+type RTSPClientConfig struct {
 	ServerAddr        string        // RTSP server hostname or IP address
 	ServerPort        int           // RTSP server port (typically 8554)
 	StreamPath        string        // RTSP stream path (e.g., "live/stream1")
@@ -27,8 +27,8 @@ type ClientConfig struct {
 	// Password          string
 }
 
-func DefaultClientConfig() *ClientConfig {
-	return &ClientConfig{
+func DefaultRTSPClientConfig() *RTSPClientConfig {
+	return &RTSPClientConfig{
 		ServerAddr:        "localhost",
 		ServerPort:        8554,
 		StreamPath:        "stream",
@@ -57,16 +57,16 @@ type RTSPClient struct {
 	wg     sync.WaitGroup     // WaitGroup for goroutine coordination
 
 	// Configuration and control
-	config        *ClientConfig // RTSPClient configuration parameters
-	reconnectChan chan struct{} // Channel for signalling reconnection needs
+	config        *RTSPClientConfig // RTSPClient configuration parameters
+	reconnectChan chan struct{}     // Channel for signalling reconnection needs
 
 	// Observability
 	metrics *UnifiedMetrics // Real-time operational metrics
 }
 
-func NewRTSPClient(ctx context.Context, config *ClientConfig, des *description.Session, options ...ClientOption) (*RTSPClient, error) {
+func NewRTSPClient(ctx context.Context, config *RTSPClientConfig, des *description.Session, options ...RTSPClientOption) (*RTSPClient, error) {
 	if config == nil {
-		config = DefaultClientConfig()
+		config = DefaultRTSPClientConfig()
 	}
 
 	if des == nil {

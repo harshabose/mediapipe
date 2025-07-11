@@ -12,7 +12,7 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-type ClientOption func(*RTSPClient) error
+type RTSPClientOption func(*RTSPClient) error
 
 type PacketisationMode uint8
 
@@ -35,7 +35,7 @@ const (
 	PacketisationMode2 PacketisationMode = 2
 )
 
-func WithH264Options(packetisationMode PacketisationMode, sps, pps []byte) ClientOption {
+func WithH264Options(packetisationMode PacketisationMode, sps, pps []byte) RTSPClientOption {
 	return func(client *RTSPClient) error {
 		media := &description.Media{
 			Type: description.MediaTypeVideo,
@@ -52,7 +52,7 @@ func WithH264Options(packetisationMode PacketisationMode, sps, pps []byte) Clien
 	}
 }
 
-func WithVP8Option() ClientOption {
+func WithVP8Option() RTSPClientOption {
 	return func(client *RTSPClient) error {
 		media := &description.Media{
 			Type: description.MediaTypeVideo,
@@ -68,7 +68,7 @@ func WithVP8Option() ClientOption {
 	}
 }
 
-func WithOpusOptions(channelCount int) ClientOption {
+func WithOpusOptions(channelCount int) RTSPClientOption {
 	return func(client *RTSPClient) error {
 		media := &description.Media{
 			Type: description.MediaTypeAudio,
@@ -83,7 +83,7 @@ func WithOpusOptions(channelCount int) ClientOption {
 	}
 }
 
-func WithOptionsFromRemote(remote *webrtc.TrackRemote) ClientOption {
+func WithOptionsFromRemote(remote *webrtc.TrackRemote) RTSPClientOption {
 	switch remote.Codec().MimeType {
 	case webrtc.MimeTypeH264:
 		return withH264OptionsFromRemote(remote)
@@ -98,7 +98,7 @@ func WithOptionsFromRemote(remote *webrtc.TrackRemote) ClientOption {
 	}
 }
 
-func withH264OptionsFromRemote(remote *webrtc.TrackRemote) ClientOption {
+func withH264OptionsFromRemote(remote *webrtc.TrackRemote) RTSPClientOption {
 	return func(client *RTSPClient) error {
 		sps, pps, err := parseSPSPPS(remote.Codec().SDPFmtpLine)
 		if err != nil {
@@ -111,7 +111,7 @@ func withH264OptionsFromRemote(remote *webrtc.TrackRemote) ClientOption {
 		}
 
 		if remote.Codec().PayloadType != 102 {
-			return fmt.Errorf("H.264 payload type mismatch: expected 102, got %d",
+			return fmt.Errorf("h.264 payload type mismatch: expected 102, got %d",
 				remote.Codec().PayloadType)
 		}
 
@@ -119,7 +119,7 @@ func withH264OptionsFromRemote(remote *webrtc.TrackRemote) ClientOption {
 	}
 }
 
-func withVP8OptionsFromRemote(remote *webrtc.TrackRemote) ClientOption {
+func withVP8OptionsFromRemote(remote *webrtc.TrackRemote) RTSPClientOption {
 	return func(client *RTSPClient) error {
 		// Validate payload type convention
 		if remote.Codec().PayloadType != 96 {
@@ -132,11 +132,11 @@ func withVP8OptionsFromRemote(remote *webrtc.TrackRemote) ClientOption {
 	}
 }
 
-func withOpusOptionsFromRemote(remote *webrtc.TrackRemote) ClientOption {
+func withOpusOptionsFromRemote(remote *webrtc.TrackRemote) RTSPClientOption {
 	return func(client *RTSPClient) error {
 		// Validate payload type convention
 		if remote.Codec().PayloadType != 111 {
-			return fmt.Errorf("Opus payload type mismatch: expected 111, got %d",
+			return fmt.Errorf("opus payload type mismatch: expected 111, got %d",
 				remote.Codec().PayloadType)
 		}
 

@@ -71,7 +71,7 @@ func (r *readerWrap[D, T]) Close() error {
 	})
 
 	if err != nil {
-		return fmt.Errorf("error while closing writerWrap: %r", err)
+		return fmt.Errorf("error while closing writerWrap: %w", err)
 	}
 
 	return nil

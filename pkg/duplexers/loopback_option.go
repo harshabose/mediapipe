@@ -4,7 +4,7 @@ import (
 	"net"
 )
 
-type Option = func(*LoopBack) error
+type LoopBackOption = func(*LoopBack) error
 
 func WithRandomBindPort(loopback *LoopBack) error {
 	var err error
@@ -15,7 +15,7 @@ func WithRandomBindPort(loopback *LoopBack) error {
 	return nil
 }
 
-func WithBindPort(port int) Option {
+func WithBindPort(port int) LoopBackOption {
 	return func(loopback *LoopBack) error {
 		var err error
 		if loopback.bindPort, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port}); err != nil {
@@ -25,7 +25,7 @@ func WithBindPort(port int) Option {
 	}
 }
 
-func WithLoopBackPort(port int) Option {
+func WithLoopBackPort(port int) LoopBackOption {
 	return func(loopback *LoopBack) error {
 		loopback.remote = &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port}
 		return nil
