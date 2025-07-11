@@ -1,12 +1,12 @@
 module github.com/harshabose/mediapipe
 
-go 1.24
+go 1.24.1
 
 require (
 	github.com/bluenviron/gortsplib/v4 v4.14.1
 	github.com/coder/websocket v1.8.13
 	github.com/emirpasic/gods/v2 v2.0.0-alpha
-	github.com/harshabose/tools/buffer v0.0.0
+	github.com/harshabose/tools v0.0.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/pion/interceptor v0.1.40
 	github.com/pion/rtp v1.8.19
@@ -38,5 +38,5 @@ require (
 
 replace (
 	github.com/harshabose/jwtAuth => ../jwtAuth
-	github.com/harshabose/tools/buffer => ../tools/buffer
+	github.com/harshabose/tools => ../tools
 )

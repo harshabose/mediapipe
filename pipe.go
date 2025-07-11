@@ -1,31 +1,3 @@
-// Pipe System - Pipeline Connection and Data Flow Management
-//
-// This package implements the connection layer of the universal media routing system,
-// providing simple, reliable pipes that connect readers to writers with proper
-// lifecycle management and fault tolerance.
-//
-// # The Pipe Philosophy
-//
-// Pipes follow the Unix philosophy of doing one thing well - they move data from
-// readers to writers reliably and efficiently. Complex concerns like buffering,
-// rate limiting, and backpressure are handled by the reader and writer components
-// themselves, keeping pipes simple and focused.
-//
-// # Fault Tolerance
-//
-// All pipes are designed for streaming media scenarios where resilience is more
-// important than perfect reliability. Temporary errors are logged and the pipeline
-// continues, ensuring that transient network issues or processing delays don't
-// bring down the entire data flow.
-//
-// # Pipeline Composition
-//
-// Pipes can be composed to create complex topologies:
-//   - 1:1 data forwarding with AnyPipe
-//   - 1:N fanout distribution with FanoutPipe
-//   - N:1 data merging with MergePipe
-//   - Multi-stage processing by chaining pipes
-
 package mediapipe
 
 import (
@@ -35,66 +7,18 @@ import (
 	"sync"
 )
 
-// Pipe defines the basic contract for all pipeline components, providing
-// flow control capabilities for managing data transmission rates and
-// handling backpressure scenarios.
-//
-// All pipe implementations should support pausing and resuming data flow
-// without losing data or corrupting the pipeline state.
 type Pipe[D, T any] interface {
 	Start()
-	// Pause temporarily stops data flow through the pipe.
-	// Buffered data is preserved and will be processed when resumed.
-	// Multiple calls to Pause() are safe and idempotent.
 	Pause()
-
-	// UnPause resumes data flow through the pipe.
-	// Processing continues from where it was paused.
-	// Multiple calls to UnPause() are safe and idempotent.
 	UnPause()
-
-	// Close shuts down the pipe and releases all resources.
-	// After Close() is called, the pipe cannot be reused.
 	Close() error
 }
 
-// CanAddReaderPipe defines pipes that support dynamic addition of readers
-// during runtime. This enables building flexible topologies where data
-// sources can be added to existing pipelines without reconstruction.
-//
-// Implementations must handle concurrent access safely and ensure
-// that newly added readers are integrated into the processing loop
-// without disrupting existing data flow.
 type CanAddReaderPipe[D, T any] interface {
-	// AddReader dynamically adds a new reader to the pipe.
-	// The reader will be integrated into the processing loop
-	// and begin contributing data according to the pipe's scheduling policy.
-	//
-	// Parameters:
-	//   - reader: The reader to add to the pipe
-	//
-	// Thread safety: This method must be safe to call concurrently
-	// with ongoing pipe operations.
 	AddReader(Reader[D, T]) (context.Context, context.CancelFunc)
 }
 
-// CanAddWriterPipe defines pipes that support dynamic addition of writers
-// during runtime. This enables building flexible topologies where data
-// destinations can be added to existing pipelines without reconstruction.
-//
-// Implementations must handle concurrent access safely and ensure
-// that newly added writers receive data according to the pipe's
-// distribution policy.
 type CanAddWriterPipe[D, T any] interface {
-	// AddWriter dynamically adds a new writer to the pipe.
-	// The writer will begin receiving data according to the pipe's
-	// distribution policy (broadcast for fanout, round-robin for merge, etc.).
-	//
-	// Parameters:
-	//   - writer: The writer to add to the pipe
-	//
-	// Thread safety: This method must be safe to call concurrently
-	// with ongoing pipe operations.
 	AddWriter(Writer[D, T]) (context.Context, context.CancelFunc)
 }
 

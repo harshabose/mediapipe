@@ -1,4 +1,4 @@
-package socket
+package duplexers
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"github.com/coder/websocket"
 )
 
-type ReaderWriter struct {
+type CoderWebsocket struct {
 	conn         *websocket.Conn
 	ctx          context.Context
 	readTimeout  time.Duration
@@ -16,8 +16,8 @@ type ReaderWriter struct {
 	messageType  websocket.MessageType
 }
 
-func NewSocketReaderWriter(ctx context.Context, conn *websocket.Conn, msgType websocket.MessageType, readTimeout time.Duration, writeTimeout time.Duration) *ReaderWriter {
-	return &ReaderWriter{
+func NewCoderSocket(ctx context.Context, conn *websocket.Conn, msgType websocket.MessageType, readTimeout time.Duration, writeTimeout time.Duration) *CoderWebsocket {
+	return &CoderWebsocket{
 		conn:         conn,
 		ctx:          ctx,
 		readTimeout:  readTimeout,
@@ -26,7 +26,7 @@ func NewSocketReaderWriter(ctx context.Context, conn *websocket.Conn, msgType we
 	}
 }
 
-func (r *ReaderWriter) Generate() ([]byte, error) {
+func (r *CoderWebsocket) Generate() ([]byte, error) {
 	ctx, cancel := context.WithTimeout(r.ctx, r.readTimeout)
 	defer cancel()
 
@@ -37,7 +37,7 @@ func (r *ReaderWriter) Generate() ([]byte, error) {
 	return data, err
 }
 
-func (r *ReaderWriter) Consume(data []byte) error {
+func (r *CoderWebsocket) Consume(data []byte) error {
 	ctx, cancel := context.WithTimeout(r.ctx, r.writeTimeout)
 	defer cancel()
 

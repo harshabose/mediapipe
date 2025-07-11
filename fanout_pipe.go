@@ -8,7 +8,7 @@ import (
 
 	"github.com/emirpasic/gods/v2/sets/hashset"
 
-	"github.com/harshabose/mediapipe/internal/utils/multierr"
+	"github.com/harshabose/tools/pkg/multierr"
 )
 
 type writerWrap[D, T any] struct {

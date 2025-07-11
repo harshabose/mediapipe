@@ -1,6 +1,8 @@
-package loopback
+package duplexers
 
-import "net"
+import (
+	"net"
+)
 
 type Option = func(*LoopBack) error
 

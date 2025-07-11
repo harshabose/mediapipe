@@ -9,7 +9,7 @@ import (
 
 	"github.com/emirpasic/gods/v2/sets/linkedhashset"
 
-	"github.com/harshabose/mediapipe/internal/utils/multierr"
+	"github.com/harshabose/tools/pkg/multierr"
 )
 
 type readerWrap[D, T any] struct {
