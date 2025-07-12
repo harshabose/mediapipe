@@ -10,6 +10,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/harshabose/mediapipe"
+	"github.com/harshabose/tools/pkg/metrics"
 )
 
 // SocketClientConfig contains all configuration parameters for the WebSocket client.
@@ -90,7 +91,7 @@ type SocketClient struct {
 	reader mediapipe.CanGenerate[[]byte] // WebSocket reader adapter for media pipeline
 	writer mediapipe.CanConsume[[]byte]  // WebSocket writer adapter for media pipeline
 
-	metrics *UnifiedMetrics // Operational metrics and statistics
+	metrics *metrics.UnifiedMetrics // Operational metrics and statistics
 
 	// Concurrency and lifecycle management
 	once      sync.Once          // Ensures Close() is idempotent
@@ -107,7 +108,7 @@ func NewSocketClient(ctx context.Context, config SocketClientConfig) *SocketClie
 	c := &SocketClient{
 		// auth:      auth.NewTokenManager(ctx2, tokenManagerConfig),
 		config:    config,
-		metrics:   NewUnifiedMetrics(ctx2, "WEBSOCKET", 10, 5*time.Second),
+		metrics:   metrics.NewUnifiedMetrics(ctx2, "WEBSOCKET", 10, 5*time.Second),
 		reconnect: make(chan struct{}, 1),
 		ctx:       ctx2,
 		cancel:    cancel,
@@ -135,7 +136,7 @@ func (c *SocketClient) Wait() <-chan struct{} {
 
 func (c *SocketClient) connect() {
 	defer c.wg.Done()
-	defer c.metrics.SetState(ClientStateDisconnected)
+	defer c.metrics.SetState(metrics.ClientStateDisconnected)
 
 	var attempt uint8 = 0
 
@@ -145,12 +146,12 @@ func (c *SocketClient) connect() {
 			fmt.Println("socket connection manager stopping due to context cancellation")
 			return
 		default:
-			c.metrics.SetState(ClientStateConnecting)
+			c.metrics.SetState(metrics.ClientStateConnecting)
 			fmt.Printf("Attempting to connect to websocket server: %s\n", c.config.Addr)
 
 			_, err := c.attemptConnection()
 			if err != nil {
-				c.metrics.SetState(ClientStateError)
+				c.metrics.SetState(metrics.ClientStateError)
 				c.metrics.AddErrors(err)
 				fmt.Printf("Websocket connection failed: %v\n", err)
 
@@ -169,7 +170,7 @@ func (c *SocketClient) connect() {
 			}
 
 			// Connection successful
-			c.metrics.SetState(ClientStateConnected)
+			c.metrics.SetState(metrics.ClientStateConnected)
 			fmt.Printf("Websocket connection established to: %s\n", c.config.Addr)
 
 			fmt.Println("Starting connection monitor...")
@@ -260,8 +261,8 @@ func (c *SocketClient) Generate() ([]byte, error) {
 		c.metrics.AddErrors(err)
 		return nil, err
 	default:
-		if c.metrics.GetState() != ClientStateConnected {
-			err := fmt.Errorf("cannot transmit data: client state is %s, expected %s (connected)", c.metrics.GetState().String(), ClientStateConnected.String())
+		if c.metrics.GetState() != metrics.ClientStateConnected {
+			err := fmt.Errorf("cannot transmit data: client state is %s, expected %s (connected)", c.metrics.GetState().String(), metrics.ClientStateConnected.String())
 			c.metrics.AddErrors(err)
 			fmt.Println(err.Error())
 			return nil, nil
@@ -279,7 +280,7 @@ func (c *SocketClient) Generate() ([]byte, error) {
 
 		data, err := c.reader.Generate()
 		if err != nil {
-			c.metrics.SetState(ClientStateError)
+			c.metrics.SetState(metrics.ClientStateError)
 			c.metrics.AddErrors(err)
 
 			select {
@@ -304,8 +305,8 @@ func (c *SocketClient) Consume(data []byte) error {
 	case <-c.ctx.Done():
 		return errors.New("context cancelled; cannot consume now")
 	default:
-		if c.metrics.GetState() != ClientStateConnected {
-			err := fmt.Errorf("cannot transmit data: client state is %d, expected %d (connected)", c.metrics.GetState(), ClientStateConnected)
+		if c.metrics.GetState() != metrics.ClientStateConnected {
+			err := fmt.Errorf("cannot transmit data: client state is %d, expected %d (connected)", c.metrics.GetState(), metrics.ClientStateConnected)
 			c.metrics.AddErrors(err)
 			fmt.Println(err.Error())
 			return nil
@@ -322,7 +323,7 @@ func (c *SocketClient) Consume(data []byte) error {
 		}
 
 		if err := c.writer.Consume(data); err != nil {
-			c.metrics.SetState(ClientStateError)
+			c.metrics.SetState(metrics.ClientStateError)
 			c.metrics.AddErrors(err)
 
 			select {
@@ -342,7 +343,7 @@ func (c *SocketClient) Consume(data []byte) error {
 	}
 }
 
-func (c *SocketClient) GetMetrics() MetricsSnapshot {
+func (c *SocketClient) GetMetrics() metrics.MetricsSnapshot {
 	return c.metrics.GetSnapshot()
 }
 

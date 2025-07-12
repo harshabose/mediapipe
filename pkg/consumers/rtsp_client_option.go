@@ -1,4 +1,4 @@
-package duplexers
+package consumers
 
 import (
 	"encoding/base64"
@@ -35,8 +35,17 @@ const (
 	PacketisationMode2 PacketisationMode = 2
 )
 
-func WithH264Options(packetisationMode PacketisationMode, sps, pps []byte) RTSPClientOption {
+func WithH264Options(packetisationMode PacketisationMode, spsBase64, ppsBase64 string) RTSPClientOption {
 	return func(client *RTSPClient) error {
+		sps, err := base64.StdEncoding.DecodeString(spsBase64)
+		if err != nil {
+			return fmt.Errorf("failed to decode sps (err: %w)", err)
+		}
+		pps, err := base64.StdEncoding.DecodeString(ppsBase64)
+		if err != nil {
+			return fmt.Errorf("failed to decode pps (err: %w)", err)
+		}
+
 		media := &description.Media{
 			Type: description.MediaTypeVideo,
 			Formats: []format.Format{&format.H264{
@@ -92,7 +101,7 @@ func WithOptionsFromRemote(remote *webrtc.TrackRemote) RTSPClientOption {
 	case webrtc.MimeTypeOpus:
 		return withOpusOptionsFromRemote(remote)
 	default:
-		return func(client *RTSPClient) error {
+		return func(_ *RTSPClient) error {
 			return fmt.Errorf("unsupported codec type: %s", remote.Codec().MimeType)
 		}
 	}
@@ -121,31 +130,27 @@ func withH264OptionsFromRemote(remote *webrtc.TrackRemote) RTSPClientOption {
 
 func withVP8OptionsFromRemote(remote *webrtc.TrackRemote) RTSPClientOption {
 	return func(client *RTSPClient) error {
-		// Validate payload type convention
 		if remote.Codec().PayloadType != 96 {
 			return fmt.Errorf("VP8 payload type mismatch: expected 96, got %d",
 				remote.Codec().PayloadType)
 		}
 
-		// Apply VP8 configuration
 		return WithVP8Option()(client)
 	}
 }
 
 func withOpusOptionsFromRemote(remote *webrtc.TrackRemote) RTSPClientOption {
 	return func(client *RTSPClient) error {
-		// Validate payload type convention
 		if remote.Codec().PayloadType != 111 {
 			return fmt.Errorf("opus payload type mismatch: expected 111, got %d",
 				remote.Codec().PayloadType)
 		}
 
-		// Apply Opus configuration with channel count from remote track
 		return WithOpusOptions(int(remote.Codec().Channels))(client)
 	}
 }
 
-func parseSPSPPS(sdpFmtpLine string) (sps, pps []byte, err error) {
+func parseSPSPPS(sdpFmtpLine string) (sps, pps string, err error) {
 	params := strings.Split(sdpFmtpLine, ";")
 	var spropParameterSets string
 
@@ -159,29 +164,17 @@ func parseSPSPPS(sdpFmtpLine string) (sps, pps []byte, err error) {
 	}
 
 	if spropParameterSets == "" {
-		return nil, nil, errors.New("sprop-parameter-sets not found in SDP fmtp line")
+		return "", "", errors.New("sprop-parameter-sets not found in SDP fmtp line")
 	}
 
 	// Split into individual parameter sets (typically SPS and PPS)
 	parameterSets := strings.Split(spropParameterSets, ",")
 	if len(parameterSets) != 2 {
-		return nil, nil, fmt.Errorf("expected 2 parameter sets (SPS, PPS), got %d",
+		return "", "", fmt.Errorf("expected 2 parameter sets (SPS, PPS), got %d",
 			len(parameterSets))
 	}
 
-	// Decode base64-encoded SPS
-	sps, err = base64.StdEncoding.DecodeString(strings.TrimSpace(parameterSets[0]))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to decode SPS from base64: %w", err)
-	}
-
-	// Decode base64-encoded PPS
-	pps, err = base64.StdEncoding.DecodeString(strings.TrimSpace(parameterSets[1]))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to decode PPS from base64: %w", err)
-	}
-
-	return sps, pps, nil
+	return strings.TrimSpace(parameterSets[0]), strings.TrimSpace(parameterSets[1]), nil
 }
 
 func parsePacketisationMode(sdpFmtpLine string) (int, error) {

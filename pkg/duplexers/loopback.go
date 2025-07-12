@@ -7,13 +7,15 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/harshabose/tools/pkg/metrics"
 )
 
 type LoopBack struct {
 	bindPort *net.UDPConn // UDP socket for bidirectional communication
 	remote   *net.UDPAddr // Remote endpoint address (auto-discovered or manually set)
 
-	metrics *UnifiedMetrics // Real-time performance metrics
+	metrics *metrics.UnifiedMetrics // Real-time performance metrics
 
 	mu sync.RWMutex // Protects concurrent access to connection state
 }
@@ -31,10 +33,10 @@ func NewLoopBack(ctx context.Context, bindAddr string, options ...LoopBackOption
 
 	l := &LoopBack{
 		bindPort: conn,
-		metrics:  NewUnifiedMetrics(ctx, fmt.Sprintf("LoopBack-%s", addr.String()), 5, 3*time.Second),
+		metrics:  metrics.NewUnifiedMetrics(ctx, fmt.Sprintf("LoopBack-%s", addr.String()), 5, 3*time.Second),
 	}
 
-	l.metrics.SetState(ClientStateConnecting)
+	l.metrics.SetState(metrics.ClientStateConnecting)
 
 	for _, option := range options {
 		if err := option(l); err != nil {
@@ -43,7 +45,7 @@ func NewLoopBack(ctx context.Context, bindAddr string, options ...LoopBackOption
 		}
 	}
 
-	l.metrics.SetState(ClientStateConnected)
+	l.metrics.SetState(metrics.ClientStateConnected)
 
 	fmt.Printf("LoopBack connected on %s\n", l.bindPort.LocalAddr().String())
 
@@ -61,7 +63,7 @@ func (l *LoopBack) write(payload []byte) error {
 	if l.bindPort == nil {
 		err := fmt.Errorf("bind port not yet set")
 		l.metrics.AddErrors(err)
-		l.metrics.SetState(ClientStateError)
+		l.metrics.SetState(metrics.ClientStateError)
 		fmt.Printf("bind port not yet set. Skipping message; no error")
 		return nil
 	}
@@ -73,7 +75,7 @@ func (l *LoopBack) write(payload []byte) error {
 	bytesWritten, err := l.bindPort.WriteToUDP(payload, l.remote)
 	if err != nil {
 		l.metrics.AddErrors(err)
-		l.metrics.SetState(ClientStateError)
+		l.metrics.SetState(metrics.ClientStateError)
 		return fmt.Errorf("failed to write UDP message: %v", err)
 	}
 
@@ -88,8 +90,8 @@ func (l *LoopBack) write(payload []byte) error {
 	l.metrics.IncrementPacketsWritten()
 	l.metrics.SetLastWriteTime(time.Now())
 
-	if l.metrics.GetState() != ClientStateConnected {
-		l.metrics.SetState(ClientStateConnected)
+	if l.metrics.GetState() != metrics.ClientStateConnected {
+		l.metrics.SetState(metrics.ClientStateConnected)
 	}
 
 	return nil
@@ -119,8 +121,8 @@ func (l *LoopBack) read() ([]byte, error) {
 		l.metrics.IncrementPacketsRead()
 		l.metrics.SetLastReadTime(time.Now())
 
-		if l.metrics.GetState() != ClientStateConnected {
-			l.metrics.SetState(ClientStateConnected)
+		if l.metrics.GetState() != metrics.ClientStateConnected {
+			l.metrics.SetState(metrics.ClientStateConnected)
 		}
 
 		return buff[:nRead], nil
@@ -136,7 +138,7 @@ func (l *LoopBack) Close() error {
 
 	fmt.Println("Closing LoopBack...")
 
-	l.metrics.SetState(ClientStateDisconnected)
+	l.metrics.SetState(metrics.ClientStateDisconnected)
 
 	var err error
 	if l.bindPort != nil {
@@ -165,7 +167,7 @@ func (l *LoopBack) readMessageFromUDPPort() ([]byte, int) {
 			return nil, 0
 		}
 		l.metrics.AddErrors(err)
-		l.metrics.SetState(ClientStateError)
+		l.metrics.SetState(metrics.ClientStateError)
 		fmt.Printf("Error while reading message from bind port: %v\n", err)
 		return nil, 0
 	}
@@ -202,7 +204,7 @@ func (l *LoopBack) SetRemoteAddress(address string) error {
 	return nil
 }
 
-func (l *LoopBack) GetMetrics() MetricsSnapshot {
+func (l *LoopBack) GetMetrics() metrics.MetricsSnapshot {
 	return l.metrics.GetSnapshot()
 }
 

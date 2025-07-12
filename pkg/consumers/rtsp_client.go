@@ -1,4 +1,4 @@
-package duplexers
+package consumers
 
 import (
 	"context"
@@ -11,20 +11,22 @@ import (
 	"github.com/bluenviron/gortsplib/v4"
 	"github.com/bluenviron/gortsplib/v4/pkg/description"
 	"github.com/pion/rtp"
+
+	"github.com/harshabose/tools/pkg/metrics"
 )
 
 type RTSPClientConfig struct {
-	ServerAddr        string        // RTSP server hostname or IP address
-	ServerPort        int           // RTSP server port (typically 8554)
-	StreamPath        string        // RTSP stream path (e.g., "live/stream1")
-	ReadTimeout       time.Duration // Timeout for reading responses from server
-	WriteTimeout      time.Duration // Timeout for writing packets to server
-	DialTimeout       time.Duration // Timeout for establishing TCP connection
-	ReconnectAttempts int           // Maximum retry attempts (-1 for infinite)
-	ReconnectDelay    time.Duration // Initial delay between reconnection attempts
-	UserAgent         string        // User-Agent header for RTSP requests
-	// Username          string
-	// Password          string
+	ServerAddr        string        `json:"server_addr"`        // RTSP server hostname or IP address
+	ServerPort        int           `json:"server_port"`        // RTSP server port (typically 8554)
+	StreamPath        string        `json:"stream_path"`        // RTSP stream path (e.g., "live/stream1")
+	ReadTimeout       time.Duration `json:"read_timeout"`       // Timeout for reading responses from server
+	WriteTimeout      time.Duration `json:"write_timeout"`      // Timeout for writing packets to server
+	DialTimeout       time.Duration `json:"dial_timeout"`       // Timeout for establishing TCP connection
+	ReconnectAttempts int           `json:"reconnect_attempts"` // Maximum retry attempts (-1 for infinite)
+	ReconnectDelay    time.Duration `json:"reconnect_delay"`    // Initial delay between reconnection attempts
+	UserAgent         string        `json:"user_agent"`         // User-Agent header for RTSP requests
+	// Username          string `json:"-"`
+	// Password          string `json:"-"`
 }
 
 func DefaultRTSPClientConfig() *RTSPClientConfig {
@@ -61,7 +63,7 @@ type RTSPClient struct {
 	reconnectChan chan struct{}     // Channel for signalling reconnection needs
 
 	// Observability
-	metrics *UnifiedMetrics // Real-time operational metrics
+	metrics *metrics.UnifiedMetrics // Real-time operational metrics
 }
 
 func NewRTSPClient(ctx context.Context, config *RTSPClientConfig, des *description.Session, options ...RTSPClientOption) (*RTSPClient, error) {
@@ -84,7 +86,7 @@ func NewRTSPClient(ctx context.Context, config *RTSPClientConfig, des *descripti
 		reconnectChan: make(chan struct{}, 1),
 		ctx:           ctx2,
 		cancel:        cancel,
-		metrics:       NewUnifiedMetrics(ctx2, "RTSP CLIENT", 10, 5*time.Second),
+		metrics:       metrics.NewUnifiedMetrics(ctx2, "RTSP CLIENT", 10, 5*time.Second),
 	}
 
 	for _, option := range options {
@@ -123,28 +125,28 @@ func (c *RTSPClient) connect() {
 		select {
 		case <-c.ctx.Done():
 			fmt.Printf("RTSP connection manager stopping due to context cancellation\n")
-			c.metrics.SetState(ClientStateDisconnected)
+			c.metrics.SetState(metrics.ClientStateDisconnected)
 			return
 		default:
 		}
 
-		c.metrics.SetState(ClientStateConnecting)
+		c.metrics.SetState(metrics.ClientStateConnecting)
 		fmt.Printf("Attempting to connect to RTSP server: %s\n", c.rtspURL)
 
 		if err := c.attemptConnection(); err != nil {
-			c.metrics.SetState(ClientStateError)
+			c.metrics.SetState(metrics.ClientStateError)
 			c.metrics.AddErrors(err)
 			fmt.Printf("RTSP connection failed: %v\n", err)
 
 			if maxAttempts == 0 {
 				fmt.Printf("No retries configured, stopping connection attempts\n")
-				c.metrics.SetState(ClientStateDisconnected)
+				c.metrics.SetState(metrics.ClientStateDisconnected)
 				return
 			}
 
 			if maxAttempts > 0 && attempt >= maxAttempts {
 				fmt.Printf("Maximum retry attempts (%d) reached, stopping\n", maxAttempts)
-				c.metrics.SetState(ClientStateDisconnected)
+				c.metrics.SetState(metrics.ClientStateDisconnected)
 				return
 			}
 
@@ -152,7 +154,7 @@ func (c *RTSPClient) connect() {
 			select {
 			case <-c.ctx.Done():
 				fmt.Printf("RTSP connection manager stopping during retry delay\n")
-				c.metrics.SetState(ClientStateDisconnected)
+				c.metrics.SetState(metrics.ClientStateDisconnected)
 				return
 			case <-time.After(currentDelay):
 				// Continue to next attempt
@@ -176,11 +178,11 @@ func (c *RTSPClient) connect() {
 		select {
 		case <-c.ctx.Done():
 			fmt.Printf("RTSP connection manager stopping - context cancelled\n")
-			c.metrics.SetState(ClientStateDisconnected)
+			c.metrics.SetState(metrics.ClientStateDisconnected)
 			return
 		default:
 			fmt.Printf("RTSP connection lost, attempting to reconnect...\n")
-			c.metrics.SetState(ClientStateConnecting)
+			c.metrics.SetState(metrics.ClientStateConnecting)
 		}
 	}
 }
@@ -199,7 +201,7 @@ func (c *RTSPClient) attemptConnection() error {
 		return fmt.Errorf("RTSP protocol negotiation failed: %w", err)
 	}
 
-	c.metrics.SetState(ClientStateConnected)
+	c.metrics.SetState(metrics.ClientStateConnected)
 	c.metrics.SetLastWriteTime(time.Now())
 
 	return nil
@@ -230,8 +232,8 @@ func (c *RTSPClient) Consume(packet *rtp.Packet) error {
 	}
 
 	state := c.metrics.GetState()
-	if state != ClientStateConnected {
-		fmt.Printf("cannot transmit packet: client state is %s, expected %s (recording)\n", state.String(), ClientStateConnected.String())
+	if state != metrics.ClientStateConnected {
+		fmt.Printf("cannot transmit packet: client state is %s, expected %s (recording)\n", state.String(), metrics.ClientStateConnected.String())
 		return nil
 	}
 
@@ -254,7 +256,7 @@ func (c *RTSPClient) Consume(packet *rtp.Packet) error {
 	}
 
 	if err := c.client.WritePacketRTP(c.description.Medias[0], packet); err != nil {
-		c.metrics.SetState(ClientStateError)
+		c.metrics.SetState(metrics.ClientStateError)
 		c.metrics.AddErrors(err)
 
 		select {
@@ -299,7 +301,7 @@ func (c *RTSPClient) Close() error {
 	}
 	c.mux.Unlock()
 
-	c.metrics.SetState(ClientStateDisconnected)
+	c.metrics.SetState(metrics.ClientStateDisconnected)
 	fmt.Printf("RTSP client shutdown complete\n")
 
 	return nil
