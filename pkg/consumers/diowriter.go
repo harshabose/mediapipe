@@ -13,7 +13,7 @@ type DIOWriter struct {
 	size uint32    // Maximum buffer size for write operations
 }
 
-func NewDataChannel(dataChannel *webrtc.DataChannel, size uint32) (*DIOWriter, error) {
+func NewDIODataChannel(dataChannel *webrtc.DataChannel, size uint32) (*DIOWriter, error) {
 	rw, err := dataChannel.Detach()
 	if err != nil {
 		return nil, err
@@ -32,7 +32,7 @@ func NewDataChannel(dataChannel *webrtc.DataChannel, size uint32) (*DIOWriter, e
 	}, nil
 }
 
-func NewWriter(writer io.Writer, size uint32) (*DIOWriter, error) {
+func NewDIOWriter(writer io.Writer, size uint32) (*DIOWriter, error) {
 	const minSize = 1024           // 1KB
 	const maxSize = math.MaxUint16 // reasonable max value
 
