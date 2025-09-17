@@ -9,11 +9,21 @@ import (
 	"time"
 
 	"github.com/harshabose/tools/pkg/buffer"
+	"github.com/harshabose/tools/pkg/multierr"
+	"github.com/harshabose/tools/pkg/set"
 )
 
 type Reader[D, T any] interface {
 	Read() (*Data[D, T], error)
 	io.Closer
+}
+
+type CanAddReader[D, T any] interface {
+	AddReader(Reader[D, T])
+}
+
+type CanRemoveReader[D, T any] interface {
+	RemoveReader(Reader[D, T])
 }
 
 type CanGenerate[T any] interface {
@@ -62,6 +72,7 @@ func (r *AnyReader[D, T]) Close() error {
 type BufferedReader[D, T any] struct {
 	reader Reader[D, T]               // Direct reference to the reader
 	buffer buffer.Buffer[*Data[D, T]] // Internal buffer for storing Data elements
+	C      chan *Data[D, T]
 
 	ctx    context.Context    // Context for cancellation and cleanup
 	cancel context.CancelFunc // Function to cancel the background reading loop
@@ -77,6 +88,8 @@ func NewBufferedReader[D, T any](ctx context.Context, reader Reader[D, T], bufsi
 		ctx:    ctx2,
 		cancel: cancel,
 	}
+
+	r.C = r.buffer.GetChannel()
 
 	r.wg.Add(1)
 	go r.loop()
@@ -135,7 +148,8 @@ func (r *BufferedReader[D, T]) Close() error {
 type BufferedTimedReader[D, T any] struct {
 	reader   Reader[D, T]               // Direct reference to the reader
 	buffer   buffer.Buffer[*Data[D, T]] // Internal buffer for storing Data elements
-	interval time.Duration              // Time interval between read operations
+	C        chan *Data[D, T]
+	interval time.Duration // Time interval between read operations
 
 	ctx    context.Context    // Context for cancellation and cleanup
 	cancel context.CancelFunc // Function to cancel the background reading loop
@@ -152,6 +166,8 @@ func NewBufferedTimedReader[D, T any](ctx context.Context, reader Reader[D, T], 
 		ctx:      ctx2,
 		cancel:   cancel,
 	}
+
+	r.C = r.buffer.GetChannel()
 
 	r.wg.Add(1)
 	go r.loop()
@@ -208,4 +224,176 @@ func (r *BufferedTimedReader[D, T]) Close() error {
 
 	// TODO: ADD CLOSE ON BUFFER
 	return nil
+}
+
+type MultiReader[D, T any] struct {
+	readers     *set.Set[Reader[D, T]]
+	readerIndex int // Current reader index for round-robin scheduling
+	mux         sync.RWMutex
+}
+
+func NewMultiReader[D, T any](readers ...Reader[D, T]) *MultiReader[D, T] {
+	return &MultiReader[D, T]{
+		readers:     set.NewSet(readers...),
+		readerIndex: 0,
+	}
+}
+
+func (r *MultiReader[D, T]) Read() (*Data[D, T], error) {
+	r.mux.Lock()
+
+	if r.readers.Size() == 0 {
+		r.mux.Unlock()
+		return nil, nil
+	}
+
+	readers := r.readers.Items()
+	if r.readerIndex >= len(readers) {
+		r.readerIndex = 0
+	}
+
+	reader := readers[r.readerIndex]
+	r.readerIndex = (r.readerIndex + 1) % len(readers)
+
+	r.mux.Unlock()
+
+	data, err := reader.Read()
+	if err != nil {
+		r.RemoveReader(reader)
+		return nil, err
+	}
+
+	return data, nil
+}
+
+func (r *MultiReader[D, T]) AddReader(reader Reader[D, T]) {
+	r.mux.Lock()
+	defer r.mux.Unlock()
+
+	if reader == nil {
+		return
+	}
+
+	r.readers.Add(reader)
+}
+
+func (r *MultiReader[D, T]) RemoveReader(reader Reader[D, T]) {
+	r.mux.Lock()
+	defer r.mux.Unlock()
+
+	if reader == nil {
+		return
+	}
+
+	r.readers.Remove(reader)
+}
+
+func (r *MultiReader[D, T]) Close() error {
+	r.mux.Lock()
+	defer r.mux.Unlock()
+
+	var merr error
+
+	for _, reader := range r.readers.Items() {
+		if err := reader.Close(); err != nil {
+			merr = multierr.Append(merr, err)
+		}
+	}
+
+	return merr
+}
+
+type MultiReader2[D, T any] struct {
+	*MultiReader[D, T]
+	bufsize int
+
+	once   sync.Once
+	mux    sync.RWMutex
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+func NewMultiReader2[D, T any](ctx context.Context, bufsize int, readers ...Reader[D, T]) *MultiReader2[D, T] {
+	ctx2, cancel2 := context.WithCancel(ctx)
+
+	r := &MultiReader2[D, T]{
+		MultiReader: NewMultiReader(readers...),
+		bufsize:     bufsize,
+		ctx:         ctx2,
+		cancel:      cancel2,
+	}
+
+	return r
+}
+
+func (r *MultiReader2[D, T]) AddReader(reader Reader[D, T]) {
+	r.mux.Lock()
+	defer r.mux.Unlock()
+
+	select {
+	case <-r.ctx.Done():
+		return
+	default:
+		if reader == nil {
+			return
+		}
+
+		bufr, ok := reader.(*BufferedReader[D, T])
+		if !ok {
+			bufr = NewBufferedReader(r.ctx, reader, r.bufsize)
+		}
+
+		r.readers.Add(bufr)
+	}
+}
+
+func (r *MultiReader2[D, T]) RemoveReader(reader Reader[D, T]) {
+	r.mux.Lock()
+	defer r.mux.Unlock()
+
+	r.readers.RemoveIf(func(r Reader[D, T]) bool {
+		bufr, ok := r.(*BufferedReader[D, T])
+		if !ok {
+			return false
+		}
+
+		return bufr.reader == reader
+	})
+}
+
+type SwappableReader[D, T any] struct {
+	reader Reader[D, T]
+	mux    sync.RWMutex
+}
+
+func NewSwappableReader[D, T any](reader Reader[D, T]) *SwappableReader[D, T] {
+	return &SwappableReader[D, T]{
+		reader: reader,
+	}
+}
+
+func (r *SwappableReader[D, T]) Swap(reader Reader[D, T]) error {
+	r.mux.Lock()
+	defer r.mux.Unlock()
+
+	if err := r.reader.Close(); err != nil {
+		return fmt.Errorf("error while swapping reader (err: %v)", err)
+	}
+
+	r.reader = reader
+	return nil
+}
+
+func (r *SwappableReader[D, T]) Read() (*Data[D, T], error) {
+	r.mux.RLock()
+	defer r.mux.RUnlock()
+
+	return r.reader.Read()
+}
+
+func (r *SwappableReader[D, T]) Close() error {
+	r.mux.Lock()
+	defer r.mux.Unlock()
+
+	return r.reader.Close()
 }

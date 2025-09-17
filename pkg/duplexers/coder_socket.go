@@ -2,50 +2,46 @@ package duplexers
 
 import (
 	"context"
-	"errors"
-	"time"
+	"sync"
 
 	"github.com/coder/websocket"
 )
 
-type CoderWebsocket struct {
-	conn         *websocket.Conn
-	ctx          context.Context
-	readTimeout  time.Duration
-	writeTimeout time.Duration
-	messageType  websocket.MessageType
+type Websocket struct {
+	conn        *websocket.Conn
+	once        sync.Once
+	ctx         context.Context
+	messageType websocket.MessageType
 }
 
-func NewCoderSocket(ctx context.Context, conn *websocket.Conn, msgType websocket.MessageType, readTimeout time.Duration, writeTimeout time.Duration) *CoderWebsocket {
-	return &CoderWebsocket{
-		conn:         conn,
-		ctx:          ctx,
-		readTimeout:  readTimeout,
-		writeTimeout: writeTimeout,
-		messageType:  msgType,
+func NewWebSocket(ctx context.Context, conn *websocket.Conn, msgType websocket.MessageType) *Websocket {
+	return &Websocket{
+		conn:        conn,
+		ctx:         ctx,
+		messageType: msgType,
 	}
 }
 
-func (r *CoderWebsocket) Generate() ([]byte, error) {
-	ctx, cancel := context.WithTimeout(r.ctx, r.readTimeout)
-	defer cancel()
-
-	_, data, err := r.conn.Read(ctx)
-	if errors.Is(err, context.DeadlineExceeded) {
-		return nil, nil
-	}
+func (r *Websocket) Generate() ([]byte, error) {
+	_, data, err := r.conn.Read(r.ctx)
 	return data, err
 }
 
-func (r *CoderWebsocket) Consume(data []byte) error {
-	ctx, cancel := context.WithTimeout(r.ctx, r.writeTimeout)
-	defer cancel()
+func (r *Websocket) Consume(data []byte) error {
+	if r.conn == nil {
+		return nil
+	}
 
-	if err := r.conn.Write(ctx, r.messageType, data); err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return nil
-		}
+	if err := r.conn.Write(r.ctx, r.messageType, data); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (r *Websocket) Close() error {
+	var err error
+	r.once.Do(func() {
+		err = r.conn.Close(websocket.StatusNormalClosure, "terminated")
+	})
+	return err
 }

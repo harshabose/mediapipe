@@ -21,18 +21,18 @@ const (
 	// Each RTP packet contains exactly one NAL unit. This is the simplest mode
 	// but may not be optimal for larger NAL units that exceed MTU size.
 	// Used for basic H.264 streaming
-	PacketisationMode0 PacketisationMode = 0
+	PacketisationMode0 PacketisationMode = iota
 
 	// PacketisationMode1 represents Non-Interleaved Mode.
 	// Allows fragmentation of large NAL units across multiple RTP packets
 	// and aggregation of small NAL units into single RTP packets.
 	// This is the most commonly used
-	PacketisationMode1 PacketisationMode = 1
+	PacketisationMode1
 
 	// PacketisationMode2 represents Interleaved Mode.
 	// Similar to Mode 1 but allows interleaving of packets from different
 	// NAL units. Rarely used due to implementation complexity.
-	PacketisationMode2 PacketisationMode = 2
+	PacketisationMode2
 )
 
 func WithH264Options(packetisationMode PacketisationMode, spsBase64, ppsBase64 string) RTSPClientOption {

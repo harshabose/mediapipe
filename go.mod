@@ -37,6 +37,5 @@ require (
 )
 
 replace (
-	github.com/harshabose/jwtAuth => ../jwtAuth
 	github.com/harshabose/tools => ../tools
 )

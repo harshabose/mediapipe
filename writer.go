@@ -1,31 +1,3 @@
-// Writer System - The Output Side of the Universal Media Router
-//
-// This file implements the writeAll/output side of the universal media routing system,
-// providing the symmetric counterpart to the Reader system. While Readers handle
-// data ingestion and transformation, Writers handle data consumption and output
-// to various destinations.
-//
-// # The Writer Pattern
-//
-// The Writer system follows the same lazy transformation philosophy as the Reader
-// system but in reverse - it takes Data[D, T] elements from the pipeline and
-// transforms them for consumption by various output destinations:
-//
-//   - WebRTC Data → RTP packets → UDP sockets
-//   - MAVLINK Data → WebSocket frames → Mission Planner
-//   - Audio Data → compressed streams → RTSP servers
-//   - Any Data → any format → any destination
-//
-// # Bidirectional Architecture
-//
-// Combined with the Reader system, this enables complete bidirectional pipelines:
-//
-//   Input: CanGenerate → Reader → BufferedReader → Data[D,T]
-//   Output: Data[D,T] → BufferedWriter → Writer → CanConsume
-//
-// This allows building complex media routing topologies where any source can
-// feed any destination through the same unified pipeline.
-
 package mediapipe
 
 import (
@@ -36,11 +8,21 @@ import (
 	"time"
 
 	"github.com/harshabose/tools/pkg/buffer"
+	"github.com/harshabose/tools/pkg/multierr"
+	"github.com/harshabose/tools/pkg/set"
 )
 
 type Writer[D, T any] interface {
 	Write(*Data[D, T]) error
 	io.Closer
+}
+
+type CanAddWriter[D, T any] interface {
+	AddWriter(Writer[D, T])
+}
+
+type CanRemoveWriter[D, T any] interface {
+	RemoveWriter(Writer[D, T])
 }
 
 type CanConsume[D any] interface {
@@ -57,6 +39,16 @@ func NewAnyWriter[D, T any](consumer CanConsume[D], transformer func(D) (T, erro
 		consumer:    consumer,
 		transformer: transformer,
 	}
+}
+
+func NewAnyMultiWriters[D, T any](transformer func(D) (T, error), consumers []CanConsume[D]) []*AnyWriter[D, T] {
+	var writers = make([]*AnyWriter[D, T], 0)
+
+	for _, consumer := range consumers {
+		writers = append(writers, NewAnyWriter[D, T](consumer, transformer))
+	}
+
+	return writers
 }
 
 func NewIdentityAnyWriter[D any](consumer CanConsume[D]) *AnyWriter[D, D] {
@@ -88,6 +80,7 @@ func (w *AnyWriter[D, T]) Close() error {
 type BufferedWriter[D, T any] struct {
 	writer Writer[D, T]               // Direct reference to the underlying writer
 	buffer buffer.Buffer[*Data[D, T]] // Internal buffer for storing Data elements
+	C      chan *Data[D, T]
 
 	ctx    context.Context    // Context for cancellation and cleanup
 	cancel context.CancelFunc // Function to cancel the background writing loop
@@ -103,6 +96,8 @@ func NewBufferedWriter[D, T any](ctx context.Context, writer Writer[D, T], bufsi
 		ctx:    ctx2,
 		cancel: cancel,
 	}
+
+	w.C = w.buffer.GetChannel()
 
 	w.wg.Add(1)
 	go w.loop()
@@ -162,6 +157,7 @@ type BufferedTimedWriter[D, T any] struct {
 	writer   Writer[D, T]               // Direct reference to the underlying writer
 	buffer   buffer.Buffer[*Data[D, T]] // Internal buffer for storing Data elements
 	interval time.Duration              // Time interval between writeAll operations
+	C        chan *Data[D, T]
 
 	ctx    context.Context    // Context for cancellation and cleanup
 	cancel context.CancelFunc // Function to cancel the background writing loop
@@ -178,6 +174,8 @@ func NewBufferedTimedWriter[D, T any](ctx context.Context, writer Writer[D, T], 
 		ctx:      ctx2,
 		cancel:   cancel,
 	}
+
+	w.C = w.buffer.GetChannel()
 
 	w.wg.Add(1)
 	go w.loop()
@@ -234,4 +232,163 @@ func (w *BufferedTimedWriter[D, T]) Close() error {
 
 	// TODO: ADD CLOSE ON BUFFER
 	return nil
+}
+
+type MultiWriter[D, T any] struct {
+	writers *set.Set[Writer[D, T]]
+	mux     sync.RWMutex
+}
+
+func NewMultiWriter[D, T any](writers ...Writer[D, T]) *MultiWriter[D, T] {
+	return &MultiWriter[D, T]{
+		writers: set.NewSet(writers...),
+	}
+}
+
+func (w *MultiWriter[D, T]) Write(data *Data[D, T]) error {
+	w.mux.RLock()
+	writers := w.writers.Items()
+	w.mux.RUnlock()
+
+	if len(writers) == 0 {
+		return nil
+	}
+
+	var merr error
+
+	for _, writer := range writers {
+		if err := writer.Write(data); err != nil {
+			merr = multierr.Append(merr, err)
+			w.RemoveWriter(writer)
+		}
+	}
+
+	return merr
+}
+
+func (w *MultiWriter[D, T]) AddWriter(writer Writer[D, T]) {
+	w.mux.Lock()
+	defer w.mux.Unlock()
+
+	if writer == nil {
+		return
+	}
+
+	w.writers.Add(writer)
+}
+
+func (w *MultiWriter[D, T]) RemoveWriter(writer Writer[D, T]) {
+	w.mux.Lock()
+	defer w.mux.Unlock()
+
+	if writer == nil {
+		return
+	}
+
+	w.writers.Remove(writer)
+}
+
+func (w *MultiWriter[D, T]) Close() error {
+	w.mux.Lock()
+	defer w.mux.Unlock()
+
+	var merr error
+
+	for _, writer := range w.writers.Items() {
+		if err := writer.Close(); err != nil {
+			merr = multierr.Append(merr, err)
+		}
+	}
+
+	return merr
+}
+
+type MultiWriter2[D, T any] struct {
+	*MultiWriter[D, T]
+	bufsize int
+
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+func NewMultiWriter2[D, T any](ctx context.Context, bufsize int, writers ...Writer[D, T]) *MultiWriter2[D, T] {
+	ctx2, cancel2 := context.WithCancel(ctx)
+
+	return &MultiWriter2[D, T]{
+		MultiWriter: NewMultiWriter(writers...),
+		bufsize:     bufsize,
+		ctx:         ctx2,
+		cancel:      cancel2,
+	}
+}
+
+func (w *MultiWriter2[D, T]) AddWriter(writer Writer[D, T]) {
+	w.mux.Lock()
+	defer w.mux.Unlock()
+
+	if writer == nil {
+		return
+	}
+
+	bufw, ok := writer.(*BufferedWriter[D, T])
+	if !ok {
+		bufw = NewBufferedWriter(w.ctx, writer, w.bufsize)
+	}
+
+	w.writers.Add(bufw)
+}
+
+func (w *MultiWriter2[D, T]) RemoveWriter(writer Writer[D, T]) {
+	w.mux.Lock()
+	defer w.mux.Unlock()
+
+	if writer == nil {
+		return
+	}
+
+	w.writers.RemoveIf(func(w Writer[D, T]) bool {
+		bufw, ok := w.(*BufferedWriter[D, T])
+		if !ok {
+			return false
+		}
+
+		return bufw.writer == writer
+	})
+}
+
+type SwappableWriter[D, T any] struct {
+	writer Writer[D, T]
+	mux    sync.RWMutex
+}
+
+func NewSwappableWriter[D, T any](writer Writer[D, T]) *SwappableWriter[D, T] {
+	return &SwappableWriter[D, T]{
+		writer: writer,
+	}
+}
+
+func (w *SwappableWriter[D, T]) Swap(writer Writer[D, T]) error {
+	w.mux.Lock()
+	defer w.mux.Unlock()
+
+	if err := w.writer.Close(); err != nil {
+		return fmt.Errorf("error while swapping writer (err: %v)", err)
+	}
+
+	w.writer = writer
+	return nil
+}
+
+func (w *SwappableWriter[D, T]) Write(data *Data[D, T]) error {
+	w.mux.RLock()
+	defer w.mux.RUnlock()
+
+	return w.writer.Write(data)
+}
+
+func (w *SwappableWriter[D, T]) Close() error {
+	w.mux.Lock()
+	defer w.mux.Unlock()
+
+	return w.writer.Close()
 }

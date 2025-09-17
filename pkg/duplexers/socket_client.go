@@ -9,7 +9,6 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/harshabose/mediapipe"
 	"github.com/harshabose/tools/pkg/metrics"
 )
 
@@ -33,10 +32,6 @@ type SocketClientConfig struct {
 
 	// WebSocket protocol settings
 	MessageType websocket.MessageType // Type of WebSocket messages (Binary/Text)
-
-	// Buffer configuration
-	ReadTimeout  time.Duration // Maximum read buffer size (0 = use max uint16 ~64KB)
-	WriteTimeout time.Duration // Maximum write buffer size (0 = use max uint16 ~64KB)
 
 	// Connection management
 	KeepConnecting bool          // Whether to maintain a persistent connection
@@ -84,12 +79,8 @@ func (c *SocketClientConfig) waitForRetry(ctx context.Context, attempt uint8) bo
 }
 
 type SocketClient struct {
-	// auth *auth.TokenManager // Authentication client for login/token management
-
+	conn   *Websocket
 	config SocketClientConfig // SocketClient configuration parameters
-
-	reader mediapipe.CanGenerate[[]byte] // WebSocket reader adapter for media pipeline
-	writer mediapipe.CanConsume[[]byte]  // WebSocket writer adapter for media pipeline
 
 	metrics *metrics.UnifiedMetrics // Operational metrics and statistics
 
@@ -103,57 +94,69 @@ type SocketClient struct {
 }
 
 func NewSocketClient(ctx context.Context, config SocketClientConfig) *SocketClient {
-	ctx2, cancel := context.WithCancel(ctx)
+	ctx2, cancel2 := context.WithCancel(ctx)
 
 	c := &SocketClient{
-		// auth:      auth.NewTokenManager(ctx2, tokenManagerConfig),
+		conn:      nil,
 		config:    config,
 		metrics:   metrics.NewUnifiedMetrics(ctx2, "WEBSOCKET", 10, 5*time.Second),
 		reconnect: make(chan struct{}, 1),
 		ctx:       ctx2,
-		cancel:    cancel,
+		cancel:    cancel2,
 	}
 
 	return c
 }
 
 func (c *SocketClient) Connect() {
-	c.wg.Add(1)
 	go c.connect()
-
-	fmt.Printf("attempting connection to %s:%d%s\n", c.config.Addr, c.config.Port, c.config.Path)
-
 }
 
-func (c *SocketClient) ConnectAndWait() <-chan struct{} {
-	c.Connect()
-	return c.ctx.Done()
+func (c *SocketClient) WaitForConnection(timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(c.ctx, timeout)
+	defer cancel()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			c.mux.RLock()
+			connected := c.conn != nil
+			c.mux.RUnlock()
+
+			if connected && c.metrics.GetState() == metrics.ConnectedState {
+				return nil
+			}
+
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 }
 
-func (c *SocketClient) Wait() <-chan struct{} {
+func (c *SocketClient) Done() <-chan struct{} {
 	return c.ctx.Done()
 }
 
 func (c *SocketClient) connect() {
+	c.wg.Add(1)
 	defer c.wg.Done()
-	defer c.metrics.SetState(metrics.ClientStateDisconnected)
+
+	defer c.metrics.SetState(metrics.DisconnectedState)
 
 	var attempt uint8 = 0
 
 	for {
 		select {
 		case <-c.ctx.Done():
-			fmt.Println("socket connection manager stopping due to context cancellation")
 			return
 		default:
-			c.metrics.SetState(metrics.ClientStateConnecting)
-			fmt.Printf("Attempting to connect to websocket server: %s\n", c.config.Addr)
+			c.metrics.SetState(metrics.ConnectingState)
 
-			_, err := c.attemptConnection()
+			conn, err := c.attemptConnection()
 			if err != nil {
-				c.metrics.SetState(metrics.ClientStateError)
+				c.metrics.SetState(metrics.ErrorState)
 				c.metrics.AddErrors(err)
-				fmt.Printf("Websocket connection failed: %v\n", err)
 
 				if !c.config.shouldRetry(attempt) {
 					return
@@ -170,14 +173,11 @@ func (c *SocketClient) connect() {
 			}
 
 			// Connection successful
-			c.metrics.SetState(metrics.ClientStateConnected)
-			fmt.Printf("Websocket connection established to: %s\n", c.config.Addr)
+			c.setConn(NewWebSocket(c.ctx, conn, c.config.MessageType))
+			c.metrics.SetState(metrics.ConnectedState)
 
-			fmt.Println("Starting connection monitor...")
 			c.monitorConnection()
-
-			// Connection lost - reset for retry
-			fmt.Printf("Connection lost; preparing to retry (attempt %d)\n", attempt+1)
+			c.metrics.SetState(metrics.DisconnectedState)
 
 			if !c.config.shouldRetry(attempt) {
 				return
@@ -193,9 +193,19 @@ func (c *SocketClient) connect() {
 	}
 }
 
+func (c *SocketClient) setConn(conn *Websocket) {
+	c.mux.Lock()
+	defer c.mux.Unlock()
+
+	c.conn = conn
+}
+
 func (c *SocketClient) monitorConnection() {
-	writesTicker := time.NewTicker(5 * time.Second)
-	defer writesTicker.Stop()
+	c.wg.Add(1)
+	defer c.wg.Done()
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
 
 	for {
 		select {
@@ -204,7 +214,7 @@ func (c *SocketClient) monitorConnection() {
 		case <-c.reconnect:
 			fmt.Println("Triggered websocket reconnection due to some error")
 			return
-		case <-writesTicker.C:
+		case <-ticker.C:
 			if time.Since(c.metrics.GetLastWriteTime()) > 60*time.Second || time.Since(c.metrics.GetLastReadTime()) > 60*time.Second {
 				fmt.Printf("socket connection appears stale (no writes and/or read for 60s)\n")
 			}
@@ -233,54 +243,35 @@ func (c *SocketClient) attemptConnection() (*websocket.Conn, error) {
 		return nil, err
 	}
 
-	fmt.Println("dail success")
-
-	if err := c.setReaderWriter(conn); err != nil {
-		return nil, err
-	}
-
 	return conn, err
-}
-
-func (c *SocketClient) setReaderWriter(conn *websocket.Conn) error {
-	rw := NewCoderSocket(c.ctx, conn, c.config.MessageType, c.config.ReadTimeout, c.config.WriteTimeout)
-
-	c.mux.Lock()
-	defer c.mux.Unlock()
-
-	c.reader = rw
-	c.writer = rw
-
-	return nil
 }
 
 func (c *SocketClient) Generate() ([]byte, error) {
 	select {
 	case <-c.ctx.Done():
-		err := errors.New("context is cancelled; cannot generate now")
-		c.metrics.AddErrors(err)
-		return nil, err
+		c.metrics.AddErrors(context.Canceled)
+		return nil, context.Canceled
 	default:
-		if c.metrics.GetState() != metrics.ClientStateConnected {
-			err := fmt.Errorf("cannot transmit data: client state is %s, expected %s (connected)", c.metrics.GetState().String(), metrics.ClientStateConnected.String())
+		if c.metrics.GetState() != metrics.ConnectedState {
+			err := fmt.Errorf("cannot transmit data: client state is %s, expected %s (connected)", c.metrics.GetState().String(), metrics.ConnectedState.String())
 			c.metrics.AddErrors(err)
 			fmt.Println(err.Error())
-			return nil, nil
+			return nil, err
 		}
 
 		c.mux.RLock()
 		defer c.mux.RUnlock()
 
-		if c.reader == nil {
+		if c.conn == nil {
 			err := errors.New("reader not ready yet")
 			c.metrics.AddErrors(err)
 			fmt.Println(err.Error())
-			return nil, nil
+			return nil, err
 		}
 
-		data, err := c.reader.Generate()
+		data, err := c.conn.Generate()
 		if err != nil {
-			c.metrics.SetState(metrics.ClientStateError)
+			c.metrics.SetState(metrics.ErrorState)
 			c.metrics.AddErrors(err)
 
 			select {
@@ -303,27 +294,28 @@ func (c *SocketClient) Generate() ([]byte, error) {
 func (c *SocketClient) Consume(data []byte) error {
 	select {
 	case <-c.ctx.Done():
-		return errors.New("context cancelled; cannot consume now")
+		c.metrics.AddErrors(context.Canceled)
+		return context.Canceled
 	default:
-		if c.metrics.GetState() != metrics.ClientStateConnected {
-			err := fmt.Errorf("cannot transmit data: client state is %d, expected %d (connected)", c.metrics.GetState(), metrics.ClientStateConnected)
+		if c.metrics.GetState() != metrics.ConnectedState {
+			err := fmt.Errorf("cannot transmit data: client state is %d, expected %d (connected)", c.metrics.GetState(), metrics.ConnectedState)
 			c.metrics.AddErrors(err)
 			fmt.Println(err.Error())
-			return nil
+			return err
 		}
 
 		c.mux.RLock()
 		defer c.mux.RUnlock()
 
-		if c.writer == nil {
+		if c.conn == nil {
 			err := errors.New("writer not ready yet")
 			c.metrics.AddErrors(err)
 			fmt.Println(err.Error())
-			return nil
+			return err
 		}
 
-		if err := c.writer.Consume(data); err != nil {
-			c.metrics.SetState(metrics.ClientStateError)
+		if err := c.conn.Consume(data); err != nil {
+			c.metrics.SetState(metrics.ErrorState)
 			c.metrics.AddErrors(err)
 
 			select {
@@ -343,7 +335,7 @@ func (c *SocketClient) Consume(data []byte) error {
 	}
 }
 
-func (c *SocketClient) GetMetrics() metrics.MetricsSnapshot {
+func (c *SocketClient) GetMetrics() metrics.Snapshot {
 	return c.metrics.GetSnapshot()
 }
 
@@ -362,13 +354,21 @@ func (c *SocketClient) GetMetrics() metrics.MetricsSnapshot {
 // }
 
 func (c *SocketClient) Close() error {
+	var err error = nil
+
 	c.once.Do(func() {
 		if c.cancel != nil {
 			c.cancel()
 		}
 
 		c.wg.Wait()
+
+		c.mux.Lock()
+		defer c.mux.Unlock()
+
+		err = c.conn.Close()
+		close(c.reconnect)
 	})
 
-	return nil
+	return err
 }

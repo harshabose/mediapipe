@@ -3,27 +3,25 @@ package consumers
 import (
 	"fmt"
 	"io"
-	"math"
 
-	"github.com/pion/webrtc/v4"
+	"github.com/harshabose/mediapipe"
 )
 
 type DIOWriter struct {
 	w    io.Writer // The underlying io.Writer being adapted
-	size uint32    // Maximum buffer size for write operations
+	size uint16    // Maximum buffer size for write operations
 }
 
-func NewDIODataChannel(dataChannel *webrtc.DataChannel, size uint32) (*DIOWriter, error) {
+func NewDIODataChannel(dataChannel mediapipe.CanDetach, size uint16) (*DIOWriter, error) {
 	rw, err := dataChannel.Detach()
 	if err != nil {
 		return nil, err
 	}
 
-	const minSize = 1024           // 1KB
-	const maxSize = math.MaxUint16 // default Pion max value
+	const minSize = 1024 // 1KB
 
-	if size < minSize || size > maxSize {
-		return nil, fmt.Errorf("buffer size %d out of range [%d, %d]", size, minSize, maxSize)
+	if size < minSize {
+		size = minSize
 	}
 
 	return &DIOWriter{
@@ -32,18 +30,17 @@ func NewDIODataChannel(dataChannel *webrtc.DataChannel, size uint32) (*DIOWriter
 	}, nil
 }
 
-func NewDIOWriter(writer io.Writer, size uint32) (*DIOWriter, error) {
-	const minSize = 1024           // 1KB
-	const maxSize = math.MaxUint16 // reasonable max value
+func NewDIOWriter(writer io.Writer, size uint16) *DIOWriter {
+	const minSize = 1024 // 1KB
 
-	if size < minSize || size > maxSize {
-		return nil, fmt.Errorf("buffer size %d out of range [%d, %d]", size, minSize, maxSize)
+	if size < minSize {
+		size = minSize
 	}
 
 	return &DIOWriter{
 		w:    writer,
 		size: size,
-	}, nil
+	}
 }
 
 func (w *DIOWriter) Consume(data []byte) error {
@@ -51,7 +48,7 @@ func (w *DIOWriter) Consume(data []byte) error {
 		return nil
 	}
 
-	if uint32(len(data)) > w.size {
+	if uint16(len(data)) > w.size {
 		return fmt.Errorf("data size %d exceeds max buffer size %d", len(data), w.size)
 	}
 

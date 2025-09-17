@@ -25,8 +25,8 @@ type RTSPClientConfig struct {
 	ReconnectAttempts int           `json:"reconnect_attempts"` // Maximum retry attempts (-1 for infinite)
 	ReconnectDelay    time.Duration `json:"reconnect_delay"`    // Initial delay between reconnection attempts
 	UserAgent         string        `json:"user_agent"`         // User-Agent header for RTSP requests
-	// Username          string `json:"-"`
-	// Password          string `json:"-"`
+	// Username string `json:"-"`
+	// Password string `json:"-"`
 }
 
 func DefaultRTSPClientConfig() *RTSPClientConfig {
@@ -50,7 +50,7 @@ type RTSPClient struct {
 
 	// RTSP protocol components
 	client      *gortsplib.Client    // Underlying gortsplib client instance
-	description *description.Session // SDP session description for the stream
+	description *description.Session // SDP process description for the stream
 
 	// Lifecycle management
 	mux    sync.RWMutex       // Protects access to client connection state
@@ -125,28 +125,28 @@ func (c *RTSPClient) connect() {
 		select {
 		case <-c.ctx.Done():
 			fmt.Printf("RTSP connection manager stopping due to context cancellation\n")
-			c.metrics.SetState(metrics.ClientStateDisconnected)
+			c.metrics.SetState(metrics.DisconnectedState)
 			return
 		default:
 		}
 
-		c.metrics.SetState(metrics.ClientStateConnecting)
+		c.metrics.SetState(metrics.ConnectingState)
 		fmt.Printf("Attempting to connect to RTSP server: %s\n", c.rtspURL)
 
 		if err := c.attemptConnection(); err != nil {
-			c.metrics.SetState(metrics.ClientStateError)
+			c.metrics.SetState(metrics.ErrorState)
 			c.metrics.AddErrors(err)
 			fmt.Printf("RTSP connection failed: %v\n", err)
 
 			if maxAttempts == 0 {
 				fmt.Printf("No retries configured, stopping connection attempts\n")
-				c.metrics.SetState(metrics.ClientStateDisconnected)
+				c.metrics.SetState(metrics.DisconnectedState)
 				return
 			}
 
 			if maxAttempts > 0 && attempt >= maxAttempts {
 				fmt.Printf("Maximum retry attempts (%d) reached, stopping\n", maxAttempts)
-				c.metrics.SetState(metrics.ClientStateDisconnected)
+				c.metrics.SetState(metrics.DisconnectedState)
 				return
 			}
 
@@ -154,7 +154,7 @@ func (c *RTSPClient) connect() {
 			select {
 			case <-c.ctx.Done():
 				fmt.Printf("RTSP connection manager stopping during retry delay\n")
-				c.metrics.SetState(metrics.ClientStateDisconnected)
+				c.metrics.SetState(metrics.DisconnectedState)
 				return
 			case <-time.After(currentDelay):
 				// Continue to next attempt
@@ -178,11 +178,11 @@ func (c *RTSPClient) connect() {
 		select {
 		case <-c.ctx.Done():
 			fmt.Printf("RTSP connection manager stopping - context cancelled\n")
-			c.metrics.SetState(metrics.ClientStateDisconnected)
+			c.metrics.SetState(metrics.DisconnectedState)
 			return
 		default:
 			fmt.Printf("RTSP connection lost, attempting to reconnect...\n")
-			c.metrics.SetState(metrics.ClientStateConnecting)
+			c.metrics.SetState(metrics.ConnectingState)
 		}
 	}
 }
@@ -201,7 +201,7 @@ func (c *RTSPClient) attemptConnection() error {
 		return fmt.Errorf("RTSP protocol negotiation failed: %w", err)
 	}
 
-	c.metrics.SetState(metrics.ClientStateConnected)
+	c.metrics.SetState(metrics.ConnectedState)
 	c.metrics.SetLastWriteTime(time.Now())
 
 	return nil
@@ -226,55 +226,59 @@ func (c *RTSPClient) monitorConnection() {
 }
 
 func (c *RTSPClient) Consume(packet *rtp.Packet) error {
-	if packet == nil {
-		// Gracefully handle nil packets (common in some pipeline scenarios)
-		return nil
-	}
-
-	state := c.metrics.GetState()
-	if state != metrics.ClientStateConnected {
-		fmt.Printf("cannot transmit packet: client state is %s, expected %s (recording)\n", state.String(), metrics.ClientStateConnected.String())
-		return nil
-	}
-
-	c.mux.RLock()
-	defer c.mux.RUnlock()
-
-	if c.client == nil {
-		return errors.New("RTSP client not initialized")
-	}
-
-	if len(c.description.Medias) == 0 || len(c.description.Medias[0].Formats) == 0 {
-		return errors.New("no media formats configured")
-	}
-
-	expectedPayloadType := c.description.Medias[0].Formats[0].PayloadType()
-	if packet.PayloadType != expectedPayloadType {
-		fmt.Printf("Correcting RTP payload type: expected %d, got %d\n",
-			expectedPayloadType, packet.PayloadType)
-		packet.PayloadType = expectedPayloadType
-	}
-
-	if err := c.client.WritePacketRTP(c.description.Medias[0], packet); err != nil {
-		c.metrics.SetState(metrics.ClientStateError)
-		c.metrics.AddErrors(err)
-
-		select {
-		case c.reconnectChan <- struct{}{}:
-			fmt.Printf("Triggered RTSP reconnection due to write error\n")
-		default:
-			// Channel full, reconnection already pending
+	select {
+	case <-c.ctx.Done():
+		return context.Canceled
+	default:
+		if packet == nil {
+			// Gracefully handle nil packets (common in some pipeline scenarios)
+			return nil
 		}
 
-		fmt.Printf("failed to write RTP packet to RTSP server: %v\n", err)
+		state := c.metrics.GetState()
+		if state != metrics.ConnectedState {
+			return fmt.Errorf("cannot transmit packet: client state is %s, expected %s (recording)", state.String(), metrics.ConnectedState.String())
+		}
+
+		c.mux.RLock()
+		defer c.mux.RUnlock()
+
+		if c.client == nil {
+			return errors.New("RTSP client not initialized")
+		}
+
+		if len(c.description.Medias) == 0 || len(c.description.Medias[0].Formats) == 0 {
+			return errors.New("no media formats configured")
+		}
+
+		expectedPayloadType := c.description.Medias[0].Formats[0].PayloadType()
+		if packet.PayloadType != expectedPayloadType {
+			fmt.Printf("Correcting RTP payload type: expected %d, got %d\n",
+				expectedPayloadType, packet.PayloadType)
+			packet.PayloadType = expectedPayloadType
+		}
+
+		if err := c.client.WritePacketRTP(c.description.Medias[0], packet); err != nil {
+			c.metrics.SetState(metrics.ErrorState)
+			c.metrics.AddErrors(err)
+
+			select {
+			case c.reconnectChan <- struct{}{}:
+				fmt.Printf("Triggered RTSP reconnection due to write error\n")
+			default:
+				// Channel full, reconnection already pending
+			}
+
+			fmt.Printf("failed to write RTP packet to RTSP server: %v\n", err)
+			return nil
+		}
+
+		c.metrics.IncrementPacketsWritten()
+		c.metrics.IncrementBytesWritten(uint64(len(packet.Payload)))
+		c.metrics.SetLastWriteTime(time.Now())
+
 		return nil
 	}
-
-	c.metrics.IncrementPacketsWritten()
-	c.metrics.IncrementBytesWritten(uint64(len(packet.Payload)))
-	c.metrics.SetLastWriteTime(time.Now())
-
-	return nil
 }
 
 func (c *RTSPClient) AppendRTSPMediaDescription(media *description.Media) {
@@ -282,7 +286,7 @@ func (c *RTSPClient) AppendRTSPMediaDescription(media *description.Media) {
 	defer c.mux.Unlock()
 
 	c.description.Medias = append(c.description.Medias, media)
-	fmt.Printf("Added media description to RTSP session (total: %d)\n", len(c.description.Medias))
+	fmt.Printf("Added media description to RTSP process (total: %d)\n", len(c.description.Medias))
 }
 
 func (c *RTSPClient) Close() error {
@@ -301,7 +305,7 @@ func (c *RTSPClient) Close() error {
 	}
 	c.mux.Unlock()
 
-	c.metrics.SetState(metrics.ClientStateDisconnected)
+	c.metrics.SetState(metrics.DisconnectedState)
 	fmt.Printf("RTSP client shutdown complete\n")
 
 	return nil

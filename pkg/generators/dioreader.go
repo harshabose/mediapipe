@@ -4,7 +4,7 @@ import (
 	"errors"
 	"io"
 
-	"github.com/pion/webrtc/v4"
+	"github.com/harshabose/mediapipe"
 )
 
 type DIOReader struct {
@@ -12,7 +12,7 @@ type DIOReader struct {
 	size uint16    // Maximum buffer size for read operations
 }
 
-func NewDIODataChannel(dataChannel *webrtc.DataChannel, size uint16) (*DIOReader, error) {
+func NewDIODataChannel(dataChannel mediapipe.CanDetach, size uint16) (*DIOReader, error) {
 	rw, err := dataChannel.Detach()
 	if err != nil {
 		return nil, err
