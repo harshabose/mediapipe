@@ -112,6 +112,7 @@ func (r *BufferedReader[D, T]) loop() {
 		default:
 			data, err := r.reader.Read()
 			if err != nil {
+				// NOTE: THIS WILL CRASH READER
 				fmt.Printf("buffered reader error while reading from the reader; err: %v", err)
 				return
 			}
@@ -244,16 +245,15 @@ func (r *MultiReader[D, T]) Read() (*Data[D, T], error) {
 
 	if r.readers.Size() == 0 {
 		r.mux.Unlock()
-		return nil, nil
+		return nil, fmt.Errorf("no readers available")
 	}
 
-	readers := r.readers.Items()
-	if r.readerIndex >= len(readers) {
+	if r.readerIndex >= r.readers.Size() {
 		r.readerIndex = 0
 	}
 
-	reader := readers[r.readerIndex]
-	r.readerIndex = (r.readerIndex + 1) % len(readers)
+	reader := r.readers.Items()[r.readerIndex]
+	r.readerIndex = (r.readerIndex + 1) % r.readers.Size()
 
 	r.mux.Unlock()
 
@@ -264,6 +264,20 @@ func (r *MultiReader[D, T]) Read() (*Data[D, T], error) {
 	}
 
 	return data, nil
+}
+
+func (r *MultiReader[D, T]) GetReaders() []Reader[D, T] {
+	r.mux.RLock()
+	defer r.mux.RUnlock()
+
+	return r.readers.Items()
+}
+
+func (r *MultiReader[D, T]) Size() int {
+	r.mux.RLock()
+	defer r.mux.RUnlock()
+
+	return r.readers.Size()
 }
 
 func (r *MultiReader[D, T]) AddReader(reader Reader[D, T]) {
@@ -304,11 +318,12 @@ func (r *MultiReader[D, T]) Close() error {
 }
 
 type MultiReader2[D, T any] struct {
-	*MultiReader[D, T]
-	bufsize int
+	reader      *set.Set[Reader[D, T]]
+	bufsize     int
+	readerAdded chan struct{} // Signal when reader is added
 
 	once   sync.Once
-	mux    sync.RWMutex
+	mux2   sync.RWMutex
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -317,18 +332,25 @@ func NewMultiReader2[D, T any](ctx context.Context, bufsize int, readers ...Read
 	ctx2, cancel2 := context.WithCancel(ctx)
 
 	r := &MultiReader2[D, T]{
-		MultiReader: NewMultiReader(readers...),
+		reader:      set.NewSet[Reader[D, T]](),
 		bufsize:     bufsize,
+		readerAdded: make(chan struct{}, 1),
 		ctx:         ctx2,
 		cancel:      cancel2,
+	}
+
+	if len(readers) > 0 {
+		for _, reader := range readers {
+			r.AddReader(reader)
+		}
 	}
 
 	return r
 }
 
 func (r *MultiReader2[D, T]) AddReader(reader Reader[D, T]) {
-	r.mux.Lock()
-	defer r.mux.Unlock()
+	r.mux2.Lock()
+	defer r.mux2.Unlock()
 
 	select {
 	case <-r.ctx.Done():
@@ -343,22 +365,118 @@ func (r *MultiReader2[D, T]) AddReader(reader Reader[D, T]) {
 			bufr = NewBufferedReader(r.ctx, reader, r.bufsize)
 		}
 
-		r.readers.Add(bufr)
+		r.reader.Add(bufr)
+
+		// Signal that a reader was added (non-blocking)
+		select {
+		case r.readerAdded <- struct{}{}:
+		default:
+		}
 	}
 }
 
 func (r *MultiReader2[D, T]) RemoveReader(reader Reader[D, T]) {
-	r.mux.Lock()
-	defer r.mux.Unlock()
+	r.mux2.Lock()
+	defer r.mux2.Unlock()
 
-	r.readers.RemoveIf(func(r Reader[D, T]) bool {
-		bufr, ok := r.(*BufferedReader[D, T])
+	if reader == nil {
+		return
+	}
+
+	bufr, ok := reader.(*BufferedReader[D, T])
+	if !ok {
+		return
+	}
+
+	r.reader.RemoveIf(func(r Reader[D, T]) bool {
+		if r == nil {
+			return false
+		}
+
+		bufr2, ok := r.(*BufferedReader[D, T])
 		if !ok {
 			return false
 		}
 
-		return bufr.reader == reader
+		return bufr2 == bufr
 	})
+}
+
+func (r *MultiReader2[D, T]) Read() (*Data[D, T], error) {
+	for {
+		r.mux2.RLock()
+		size := r.reader.Size()
+		r.mux2.RUnlock()
+
+		if size == 0 {
+			// Block until reader is added or context cancelled
+			select {
+			case <-r.readerAdded:
+				continue // Retry reading
+			case <-r.ctx.Done():
+				return nil, r.ctx.Err()
+			}
+		}
+
+		readers := r.reader.Items()
+		cases := make([]reflect.SelectCase, 0, len(readers)+1)
+
+		for _, reader := range readers {
+			bufr, ok := reader.(*BufferedReader[D, T])
+			if !ok {
+				continue
+			}
+			cases = append(cases, reflect.SelectCase{
+				Dir:  reflect.SelectRecv,
+				Chan: reflect.ValueOf(bufr.C),
+			})
+		}
+
+		cases = append(cases, reflect.SelectCase{
+			Dir:  reflect.SelectRecv,
+			Chan: reflect.ValueOf(r.ctx.Done()),
+		})
+
+		chosen, value, ok := reflect.Select(cases)
+
+		if chosen == len(cases)-1 {
+			return nil, r.ctx.Err()
+		}
+
+		if !ok {
+			// Channel closed, remove reader and retry
+			r.mux2.Lock()
+			if chosen < len(readers) {
+				r.reader.Remove(readers[chosen])
+			}
+			r.mux2.Unlock()
+			continue
+		}
+
+		data, ok := value.Interface().(*Data[D, T])
+		if !ok {
+			return nil, fmt.Errorf("unexpected data type from reader")
+		}
+
+		return data, nil
+	}
+}
+
+func (r *MultiReader2[D, T]) Close() error {
+	var merr error = nil
+	r.once.Do(func() {
+		if r.cancel != nil {
+			r.cancel()
+		}
+
+		for _, reader := range r.reader.Items() {
+			if err := reader.Close(); err != nil {
+				merr = multierr.Append(merr, err)
+			}
+		}
+	})
+
+	return merr
 }
 
 type SwappableReader[D, T any] struct {

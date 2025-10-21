@@ -10,6 +10,7 @@ import (
 
 	"github.com/bluenviron/gortsplib/v4"
 	"github.com/bluenviron/gortsplib/v4/pkg/description"
+	"github.com/bluenviron/gortsplib/v4/pkg/format"
 	"github.com/pion/rtp"
 
 	"github.com/harshabose/tools/pkg/metrics"
@@ -109,8 +110,26 @@ func (c *RTSPClient) Start() {
 	go c.connect()
 }
 
+func (c *RTSPClient) WaitForConnection(timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(c.ctx, timeout)
+	defer cancel()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			if c.metrics.GetState() == metrics.ConnectedState {
+				return nil
+			}
+
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+}
+
 func (c *RTSPClient) StartAndWait() <-chan struct{} {
-	c.connect()
+	c.Start()
 	return c.ctx.Done()
 }
 
@@ -237,7 +256,8 @@ func (c *RTSPClient) Consume(packet *rtp.Packet) error {
 
 		state := c.metrics.GetState()
 		if state != metrics.ConnectedState {
-			return fmt.Errorf("cannot transmit packet: client state is %s, expected %s (recording)", state.String(), metrics.ConnectedState.String())
+			fmt.Printf("cannot transmit packet: client state is %s, expected %s (recording)\n", state.String(), metrics.ConnectedState.String())
+			return nil
 		}
 
 		c.mux.RLock()
@@ -287,6 +307,23 @@ func (c *RTSPClient) AppendRTSPMediaDescription(media *description.Media) {
 
 	c.description.Medias = append(c.description.Medias, media)
 	fmt.Printf("Added media description to RTSP process (total: %d)\n", len(c.description.Medias))
+}
+
+func (c *RTSPClient) GetH264Parameters() (sps, pps []byte, err error) {
+	c.mux.Lock()
+	defer c.mux.Unlock()
+
+	for _, media := range c.description.Medias {
+		if media.Type == description.MediaTypeVideo {
+			for _, _format := range media.Formats {
+				if f, ok := _format.(*format.H264); ok {
+					return f.SPS, f.PPS, nil
+				}
+			}
+		}
+	}
+
+	return nil, nil, fmt.Errorf("no H264 description found")
 }
 
 func (c *RTSPClient) Close() error {

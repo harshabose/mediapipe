@@ -35,13 +35,21 @@ const (
 	PacketisationMode2
 )
 
+func AsBase64(value string) ([]byte, error) {
+	return base64.StdEncoding.DecodeString(value)
+}
+
+func AsString(value []byte) string {
+	return base64.StdEncoding.EncodeToString(value)
+}
+
 func WithH264Options(packetisationMode PacketisationMode, spsBase64, ppsBase64 string) RTSPClientOption {
 	return func(client *RTSPClient) error {
-		sps, err := base64.StdEncoding.DecodeString(spsBase64)
+		sps, err := AsBase64(spsBase64)
 		if err != nil {
 			return fmt.Errorf("failed to decode sps (err: %w)", err)
 		}
-		pps, err := base64.StdEncoding.DecodeString(ppsBase64)
+		pps, err := AsBase64(ppsBase64)
 		if err != nil {
 			return fmt.Errorf("failed to decode pps (err: %w)", err)
 		}
