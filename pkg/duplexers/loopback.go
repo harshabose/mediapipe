@@ -1,7 +1,7 @@
 package duplexers
 
 //
-// type LoopBack struct {
+// type LocalUDP struct {
 // 	bind   *net.UDPConn // UDP socket for bidirectional communication
 // 	remote *net.UDPAddr // Remote endpoint address (auto-discovered or manually set)
 //
@@ -10,7 +10,7 @@ package duplexers
 // 	mux sync.RWMutex // Protects concurrent access to connection state
 // }
 //
-// func NewLoopBack(ctx context.Context, addr string, options ...LoopBackOption) (*LoopBack, error) {
+// func NewLoopBack(ctx context.Context, addr string, options ...LoopBackOption) (*LocalUDP, error) {
 //
 // 	addr, err := net.ResolveUDPAddr("udp", addr)
 // 	if err != nil {
@@ -22,9 +22,9 @@ package duplexers
 // 		return nil, fmt.Errorf("failed to bind UDP socket: %v", err)
 // 	}
 //
-// 	l := &LoopBack{
+// 	l := &LocalUDP{
 // 		bind:    conn,
-// 		metrics: metrics.NewUnifiedMetrics(ctx, fmt.Sprintf("LoopBack-%s", addr.String()), 5, 3*time.Second),
+// 		metrics: metrics.NewUnifiedMetrics(ctx, fmt.Sprintf("LocalUDP-%s", addr.String()), 5, 3*time.Second),
 // 	}
 //
 // 	l.metrics.SetState(metrics.ConnectingState)
@@ -37,16 +37,16 @@ package duplexers
 //
 // 	l.metrics.SetState(metrics.ConnectedState)
 //
-// 	fmt.Printf("LoopBack connected on %s\n", l.bind.LocalAddr().String())
+// 	fmt.Printf("LocalUDP connected on %s\n", l.bind.LocalAddr().String())
 //
 // 	return l, nil
 // }
 //
-// func (l *LoopBack) Consume(payload []byte) error {
+// func (l *LocalUDP) Consume(payload []byte) error {
 // 	return l.write(payload)
 // }
 //
-// func (l *LoopBack) write(payload []byte) error {
+// func (l *LocalUDP) write(payload []byte) error {
 // 	l.mux.RLock()
 // 	defer l.mux.RUnlock()
 //
@@ -87,17 +87,17 @@ package duplexers
 // 	return nil
 // }
 //
-// func (l *LoopBack) Generate() ([]byte, error) {
+// func (l *LocalUDP) Generate() ([]byte, error) {
 // 	data, err := l.read()
 // 	if err != nil {
 // 		l.metrics.AddErrors(err)
-// 		return nil, fmt.Errorf("ERROR: loopback failed to generate; err: %w", err)
+// 		return nil, fmt.Errorf("ERROR: udp failed to generate; err: %w", err)
 // 	}
 //
 // 	return data, nil
 // }
 //
-// func (l *LoopBack) read() ([]byte, error) {
+// func (l *LocalUDP) read() ([]byte, error) {
 // 	// Set read timeout to allow periodic context checking // TODO: ADD CONSISTENT TIMEOUT
 // 	if err := l.bind.SetReadDeadline(time.Now().Add(1 * time.Second)); err != nil {
 // 		l.metrics.AddErrors(err)
@@ -122,11 +122,11 @@ package duplexers
 // 	return nil, nil
 // }
 //
-// func (l *LoopBack) Close() error {
+// func (l *LocalUDP) Close() error {
 // 	l.mux.Lock()
 // 	defer l.mux.Unlock()
 //
-// 	fmt.Println("Closing LoopBack...")
+// 	fmt.Println("Closing LocalUDP...")
 //
 // 	l.metrics.SetState(metrics.DisconnectedState)
 //
@@ -142,11 +142,11 @@ package duplexers
 // 		}
 // 	}
 //
-// 	fmt.Println("LoopBack closed")
+// 	fmt.Println("LocalUDP closed")
 // 	return err
 // }
 //
-// func (l *LoopBack) readMessageFromUDPPort() ([]byte, int) {
+// func (l *LocalUDP) readMessageFromUDPPort() ([]byte, int) {
 // 	buffer := make([]byte, 1500) // Standard MTU size
 //
 // 	nRead, senderAddr, err := l.bind.ReadFromUDP(buffer)
@@ -179,7 +179,7 @@ package duplexers
 // 	return buffer, nRead
 // }
 //
-// func (l *LoopBack) SetRemoteAddress(address string) error {
+// func (l *LocalUDP) SetRemoteAddress(address string) error {
 // 	addr, err := net.ResolveUDPAddr("udp", address)
 // 	if err != nil {
 // 		l.metrics.AddErrors(err)
@@ -194,11 +194,11 @@ package duplexers
 // 	return nil
 // }
 //
-// func (l *LoopBack) GetMetrics() metrics.Snapshot {
+// func (l *LocalUDP) GetMetrics() metrics.Snapshot {
 // 	return l.metrics.GetSnapshot()
 // }
 //
-// func (l *LoopBack) GetLocalAddress() string {
+// func (l *LocalUDP) GetLocalAddress() string {
 // 	l.mux.RLock()
 // 	defer l.mux.RUnlock()
 //
@@ -208,7 +208,7 @@ package duplexers
 // 	return l.bind.LocalAddr().String()
 // }
 //
-// func (l *LoopBack) GetRemoteAddress() string {
+// func (l *LocalUDP) GetRemoteAddress() string {
 // 	l.mux.RLock()
 // 	defer l.mux.RUnlock()
 //

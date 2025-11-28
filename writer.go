@@ -314,12 +314,18 @@ type MultiWriter2[D, T any] struct {
 func NewMultiWriter2[D, T any](ctx context.Context, bufsize int, writers ...Writer[D, T]) *MultiWriter2[D, T] {
 	ctx2, cancel2 := context.WithCancel(ctx)
 
-	return &MultiWriter2[D, T]{
-		MultiWriter: NewMultiWriter(writers...),
+	w := &MultiWriter2[D, T]{
+		MultiWriter: NewMultiWriter[D, T](),
 		bufsize:     bufsize,
 		ctx:         ctx2,
 		cancel:      cancel2,
 	}
+
+	for _, writer := range writers {
+		w.AddWriter(writer)
+	}
+
+	return w
 }
 
 func (w *MultiWriter2[D, T]) AddWriter(writer Writer[D, T]) {
@@ -391,4 +397,52 @@ func (w *SwappableWriter[D, T]) Close() error {
 	defer w.mux.Unlock()
 
 	return w.writer.Close()
+}
+
+type CtxWriter[D, T any] struct {
+	w Writer[D, T]
+
+	once   sync.Once
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+func NewCtxWriter[D, T any](ctx context.Context, writer Writer[D, T]) *CtxWriter[D, T] {
+	ctx2, cancel2 := context.WithCancel(ctx)
+	return &CtxWriter[D, T]{
+		w:      writer,
+		ctx:    ctx2,
+		cancel: cancel2,
+	}
+}
+
+func (w *CtxWriter[D, T]) Done() <-chan struct{} {
+	return w.ctx.Done()
+}
+
+func (w *CtxWriter[D, T]) Write(data *Data[D, T]) error {
+	select {
+	case <-w.Done():
+		return w.ctx.Err()
+	default:
+		if err := w.w.Write(data); err != nil {
+			w.cancel()
+			return err
+		}
+
+		return nil
+	}
+}
+
+func (w *CtxWriter[D, T]) Close() error {
+	var err error
+	w.once.Do(func() {
+		if w.cancel != nil {
+			w.cancel()
+		}
+
+		err = w.w.Close()
+	})
+
+	return err
 }

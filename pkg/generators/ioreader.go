@@ -1,6 +1,7 @@
 package generators
 
 import (
+	"errors"
 	"io"
 
 	"github.com/pion/webrtc/v4"
@@ -45,7 +46,16 @@ func NewIOReader(reader io.Reader, size uint16) *IOReader {
 }
 
 func (r *IOReader) Generate() ([]byte, error) {
-	return io.ReadAll(io.LimitReader(r.r, int64(r.size)))
+	// return io.ReadAll(io.LimitReader(r.r, int64(r.size)))
+	buf := make([]byte, r.size)
+	n, err := r.r.Read(buf)
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return buf[:n], nil
 }
 
 func (r *IOReader) Close() error {

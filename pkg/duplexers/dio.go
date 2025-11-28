@@ -29,11 +29,6 @@ func NewDIO(dc *webrtc.DataChannel, size uint16) (*DIO, error) {
 		}
 		break
 	}
-	const minsize = 1024
-
-	if size < minsize {
-		size = minsize
-	}
 
 	return &DIO{
 		DIOWriter: consumers.NewDIOWriter(rw, size),

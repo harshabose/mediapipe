@@ -352,26 +352,21 @@ func (r *MultiReader2[D, T]) AddReader(reader Reader[D, T]) {
 	r.mux2.Lock()
 	defer r.mux2.Unlock()
 
-	select {
-	case <-r.ctx.Done():
+	if reader == nil {
 		return
+	}
+
+	bufr, ok := reader.(*BufferedReader[D, T])
+	if !ok {
+		bufr = NewBufferedReader(r.ctx, reader, r.bufsize)
+	}
+
+	r.reader.Add(bufr)
+
+	// Signal that a reader was added (non-blocking)
+	select {
+	case r.readerAdded <- struct{}{}:
 	default:
-		if reader == nil {
-			return
-		}
-
-		bufr, ok := reader.(*BufferedReader[D, T])
-		if !ok {
-			bufr = NewBufferedReader(r.ctx, reader, r.bufsize)
-		}
-
-		r.reader.Add(bufr)
-
-		// Signal that a reader was added (non-blocking)
-		select {
-		case r.readerAdded <- struct{}{}:
-		default:
-		}
 	}
 }
 
@@ -383,22 +378,17 @@ func (r *MultiReader2[D, T]) RemoveReader(reader Reader[D, T]) {
 		return
 	}
 
-	bufr, ok := reader.(*BufferedReader[D, T])
-	if !ok {
-		return
-	}
-
 	r.reader.RemoveIf(func(r Reader[D, T]) bool {
 		if r == nil {
 			return false
 		}
 
-		bufr2, ok := r.(*BufferedReader[D, T])
+		bufr, ok := r.(*BufferedReader[D, T])
 		if !ok {
 			return false
 		}
 
-		return bufr2 == bufr
+		return bufr.reader == reader
 	})
 }
 
@@ -444,7 +434,7 @@ func (r *MultiReader2[D, T]) Read() (*Data[D, T], error) {
 		}
 
 		if !ok {
-			// Channel closed, remove reader and retry
+			// Channel closed, remove reader and retry, usually means reader error
 			r.mux2.Lock()
 			if chosen < len(readers) {
 				r.reader.Remove(readers[chosen])
@@ -514,4 +504,53 @@ func (r *SwappableReader[D, T]) Close() error {
 	defer r.mux.Unlock()
 
 	return r.reader.Close()
+}
+
+type CtxReader[D, T any] struct {
+	r Reader[D, T]
+
+	once   sync.Once
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+func NewCtxReader[D, T any](ctx context.Context, reader Reader[D, T]) *CtxReader[D, T] {
+	ctx2, cancel2 := context.WithCancel(ctx)
+	return &CtxReader[D, T]{
+		r:      reader,
+		ctx:    ctx2,
+		cancel: cancel2,
+	}
+}
+
+func (r *CtxReader[D, T]) Done() <-chan struct{} {
+	return r.ctx.Done()
+}
+
+func (r *CtxReader[D, T]) Read() (*Data[D, T], error) {
+	select {
+	case <-r.ctx.Done():
+		return nil, r.ctx.Err()
+	default:
+		data, err := r.r.Read()
+		if err != nil {
+			r.cancel()
+			return nil, err
+		}
+
+		return data, nil
+	}
+}
+
+func (r *CtxReader[D, T]) Close() error {
+	var err error
+	r.once.Do(func() {
+		if r.cancel != nil {
+			r.cancel()
+		}
+
+		err = r.r.Close()
+	})
+
+	return err
 }

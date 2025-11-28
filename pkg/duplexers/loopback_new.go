@@ -43,49 +43,116 @@ func (u *udp) findAddr() error {
 	return nil
 }
 
-type LoopBack struct {
+type LocalUDP struct {
 	bind   *udp
 	remote *udp
 
 	metrics *metrics.UnifiedMetrics
+	ctx     context.Context
+	cancel  context.CancelFunc
 
-	mux sync.RWMutex
+	mux  sync.RWMutex
+	pool sync.Pool
 }
 
-func NewLoopBack(ctx context.Context, options ...LoopBackOption) (*LoopBack, error) {
-	l := &LoopBack{
+func NewLoopBack(ctx context.Context, options ...LoopBackOption) (*LocalUDP, error) {
+	ctx2, cancel2 := context.WithCancel(ctx)
+	l := &LocalUDP{
 		bind:   &udp{ip: "127.0.0.1"},
 		remote: &udp{ip: "127.0.0.1"},
+		ctx:    ctx2,
+		cancel: cancel2,
+	}
+
+	l.pool = sync.Pool{
+		New: func() interface{} {
+			buf := make([]byte, 1500) // Standard MTU size
+			return &buf
+		},
 	}
 
 	for _, option := range options {
 		if err := option(l); err != nil {
+			cancel2()
 			return nil, fmt.Errorf("error while applying option; err: %v", err)
 		}
 	}
 
 	if err := l.bind.connect(); err != nil {
+		cancel2()
 		return nil, fmt.Errorf("failed to bind UDP socket: %v", err)
 	}
 
 	if l.remote.port != 0 {
 		if err := l.remote.findAddr(); err != nil {
+			cancel2()
+			l.bind.conn.Close()
 			return nil, fmt.Errorf("failed to find remote udp addr: %v", err)
 		}
 	}
 
-	l.metrics = metrics.NewUnifiedMetrics(ctx, fmt.Sprintf("LoopBack-%s", l.bind.conn.LocalAddr().String()), 5, 3*time.Second)
+	l.metrics = metrics.NewUnifiedMetrics(ctx, fmt.Sprintf("LocalUDP-%s", l.bind.conn.LocalAddr().String()), 5, 3*time.Second)
 	l.metrics.SetState(metrics.ConnectedState)
 
-	fmt.Printf("LoopBack connected on %s\n", l.bind.conn.LocalAddr().String())
+	fmt.Printf("LocalUDP connected on %s\n", l.bind.conn.LocalAddr().String())
 	return l, nil
 }
 
-func (l *LoopBack) Consume(payload []byte) error {
+func NewLocalNet(ctx context.Context, ip string, options ...LoopBackOption) (*LocalUDP, error) {
+	ctx2, cancel2 := context.WithCancel(ctx)
+	l := &LocalUDP{
+		bind:   &udp{ip: ip},
+		remote: &udp{ip: ip},
+		ctx:    ctx2,
+		cancel: cancel2,
+	}
+
+	// Initialize buffer pool
+	l.pool = sync.Pool{
+		New: func() interface{} {
+			buf := make([]byte, 1500) // Standard MTU size
+			return &buf
+		},
+	}
+
+	for _, option := range options {
+		if err := option(l); err != nil {
+			cancel2()
+			return nil, fmt.Errorf("error while applying option; err: %v", err)
+		}
+	}
+
+	if err := l.bind.connect(); err != nil {
+		cancel2()
+		return nil, fmt.Errorf("failed to bind UDP socket: %v", err)
+	}
+
+	if l.remote.port != 0 {
+		if err := l.remote.findAddr(); err != nil {
+			cancel2()
+			l.bind.conn.Close()
+			return nil, fmt.Errorf("failed to find remote udp addr: %v", err)
+		}
+	}
+
+	l.metrics = metrics.NewUnifiedMetrics(ctx, fmt.Sprintf("LocalUDP-%s", l.bind.conn.LocalAddr().String()), 5, 3*time.Second)
+	l.metrics.SetState(metrics.ConnectedState)
+
+	fmt.Printf("LocalUDP connected on %s\n", l.bind.conn.LocalAddr().String())
+	return l, nil
+}
+
+func (l *LocalUDP) Consume(payload []byte) error {
 	return l.write(payload)
 }
 
-func (l *LoopBack) write(payload []byte) error {
+func (l *LocalUDP) write(payload []byte) error {
+	select {
+	case <-l.ctx.Done():
+		return fmt.Errorf("context cancelled: %w", l.ctx.Err())
+	default:
+	}
+
 	l.mux.RLock()
 	defer l.mux.RUnlock()
 
@@ -93,12 +160,12 @@ func (l *LoopBack) write(payload []byte) error {
 		err := fmt.Errorf("bind port not yet set")
 		l.metrics.AddErrors(err)
 		l.metrics.SetState(metrics.ErrorState)
-		fmt.Printf("bind port not yet set. Skipping message; no error")
-		return nil
+		return err
 	}
 	if l.remote.addr == nil {
-		fmt.Printf("remote port not yet discovered. Skipping message; no error")
-		return nil
+		err := fmt.Errorf("remote port not yet discovered")
+		l.metrics.AddErrors(err)
+		return err
 	}
 
 	bytesWritten, err := l.bind.conn.WriteToUDP(payload, l.remote.addr)
@@ -114,7 +181,6 @@ func (l *LoopBack) write(payload []byte) error {
 		return err
 	}
 
-	// Update metrics
 	l.metrics.IncrementBytesWritten(uint64(bytesWritten))
 	l.metrics.IncrementPacketsWritten()
 	l.metrics.SetLastWriteTime(time.Now())
@@ -126,26 +192,38 @@ func (l *LoopBack) write(payload []byte) error {
 	return nil
 }
 
-func (l *LoopBack) Generate() ([]byte, error) {
+func (l *LocalUDP) Generate() ([]byte, error) {
 	data, err := l.read()
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil, err
+		}
 		l.metrics.AddErrors(err)
-		return nil, fmt.Errorf("ERROR: loopback failed to generate; err: %w", err)
+		return nil, fmt.Errorf("ERROR: udp failed to generate; err: %w", err)
 	}
 
 	return data, nil
 }
 
-func (l *LoopBack) read() ([]byte, error) {
+func (l *LocalUDP) read() ([]byte, error) {
+	select {
+	case <-l.ctx.Done():
+		return nil, l.ctx.Err()
+	default:
+	}
+
 	// Set read timeout to allow periodic context checking
 	if err := l.bind.conn.SetReadDeadline(time.Now().Add(1 * time.Second)); err != nil {
 		l.metrics.AddErrors(err)
 		fmt.Printf("Error while setting read deadline on UDP bind port: %v. Continuing...\n", err)
 	}
 
-	buff, nRead := l.readMessageFromUDPPort()
+	buff, nRead, err := l.readMessageFromUDPPort()
+	if err != nil {
+		return nil, err
+	}
+
 	if nRead > 0 && buff != nil {
-		// Update metrics
 		l.metrics.IncrementBytesRead(uint64(nRead))
 		l.metrics.IncrementPacketsRead()
 		l.metrics.SetLastReadTime(time.Now())
@@ -154,18 +232,31 @@ func (l *LoopBack) read() ([]byte, error) {
 			l.metrics.SetState(metrics.ConnectedState)
 		}
 
-		return buff[:nRead], nil
+		data := make([]byte, nRead)
+		copy(data, (*buff)[:nRead])
+
+		l.pool.Put(buff)
+
+		return data, nil
 	}
 
-	// Return nil to indicate no data available (Reader should handle appropriately)
+	if buff != nil {
+		l.pool.Put(buff)
+	}
+
+	// Returning nil to indicate no data available (Reader handle appropriately)
 	return nil, nil
 }
 
-func (l *LoopBack) Close() error {
+func (l *LocalUDP) Close() error {
 	l.mux.Lock()
 	defer l.mux.Unlock()
 
-	fmt.Println("Closing LoopBack...")
+	fmt.Println("Closing LocalUDP...")
+
+	if l.cancel != nil {
+		l.cancel()
+	}
 
 	l.metrics.SetState(metrics.DisconnectedState)
 
@@ -181,46 +272,55 @@ func (l *LoopBack) Close() error {
 		}
 	}
 
-	fmt.Println("LoopBack closed")
+	fmt.Println("LocalUDP closed")
 	return err
 }
 
-func (l *LoopBack) readMessageFromUDPPort() ([]byte, int) {
-	buffer := make([]byte, 1500) // Standard MTU size
+func (l *LocalUDP) readMessageFromUDPPort() (*[]byte, int, error) {
+	bufPtr := l.pool.Get().(*[]byte)
+	buffer := *bufPtr
 
 	nRead, senderAddr, err := l.bind.conn.ReadFromUDP(buffer)
 	if err != nil {
 		var netErr net.Error
 		if errors.As(err, &netErr) && netErr.Timeout() {
-			// Timeout is not really an error
-			return nil, 0
+			// Timeout is not really an error - return buffer to pool
+			l.pool.Put(bufPtr)
+			return nil, 0, nil
 		}
 		l.metrics.AddErrors(err)
 		l.metrics.SetState(metrics.ErrorState)
 		fmt.Printf("Error while reading message from bind port: %v\n", err)
-		return nil, 0
+		// Return buffer to pool on error
+		l.pool.Put(bufPtr)
+		return nil, 0, err
 	}
 
 	// Auto-discover remote address from first received packet
 	l.mux.Lock()
+	var remoteAddrPort int
 	if l.remote.addr == nil {
 		l.remote.addr = &net.UDPAddr{IP: senderAddr.IP, Port: senderAddr.Port}
 		l.remote.ip = senderAddr.IP.String()
 		l.remote.port = senderAddr.Port
 		fmt.Printf("Auto-discovered remote address: %s\n", l.remote.addr.String())
+		remoteAddrPort = l.remote.addr.Port
+	} else {
+		remoteAddrPort = l.remote.addr.Port
 	}
 	l.mux.Unlock()
 
-	if senderAddr != nil && l.remote.addr != nil && senderAddr.Port != l.remote.addr.Port {
-		err := fmt.Errorf("expected port %d but got %d", l.remote.addr.Port, senderAddr.Port)
+	// Check port mismatch while NOT holding the lock
+	if senderAddr != nil && senderAddr.Port != remoteAddrPort {
+		err := fmt.Errorf("expected port %d but got %d", remoteAddrPort, senderAddr.Port)
 		l.metrics.AddErrors(err)
 		fmt.Printf("Warning: %v\n", err)
 	}
 
-	return buffer, nRead
+	return bufPtr, nRead, nil
 }
 
-func (l *LoopBack) SetRemoteAddress(address string) error {
+func (l *LocalUDP) SetRemoteAddress(address string) error {
 	addr, err := net.ResolveUDPAddr("udp", address)
 	if err != nil {
 		l.metrics.AddErrors(err)
@@ -237,11 +337,11 @@ func (l *LoopBack) SetRemoteAddress(address string) error {
 	return nil
 }
 
-func (l *LoopBack) GetMetrics() metrics.Snapshot {
+func (l *LocalUDP) GetMetrics() metrics.Snapshot {
 	return l.metrics.GetSnapshot()
 }
 
-func (l *LoopBack) GetLocalAddress() string {
+func (l *LocalUDP) GetLocalAddress() string {
 	l.mux.RLock()
 	defer l.mux.RUnlock()
 
@@ -251,7 +351,7 @@ func (l *LoopBack) GetLocalAddress() string {
 	return l.bind.conn.LocalAddr().String()
 }
 
-func (l *LoopBack) GetRemoteAddress() string {
+func (l *LocalUDP) GetRemoteAddress() string {
 	l.mux.RLock()
 	defer l.mux.RUnlock()
 
@@ -261,7 +361,7 @@ func (l *LoopBack) GetRemoteAddress() string {
 	return l.remote.addr.String()
 }
 
-func (l *LoopBack) GetBindPort() uint16 {
+func (l *LocalUDP) GetBindPort() uint16 {
 	l.mux.RLock()
 	defer l.mux.RUnlock()
 

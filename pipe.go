@@ -48,6 +48,10 @@ func NewAnyReaderWriter[D, T any](generator CanGenerate[T], consumer CanConsume[
 	return NewReaderWriter(r, w)
 }
 
+func NewIdentityReaderWriter[T any](reader Reader[T, T], writer Writer[T, T]) *AnyReaderWriter[T, T] {
+	return NewReaderWriter(reader, writer)
+}
+
 type Pipe[D, T any] interface {
 	Start()
 	Close()
