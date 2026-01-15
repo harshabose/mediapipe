@@ -28,6 +28,7 @@ type RTSPClientConfig struct {
 	UserAgent         string        `json:"user_agent"`         // User-Agent header for RTSP requests
 	// Username string `json:"-"`
 	// Password string `json:"-"`
+	WriteQueueSize int `json:"write_queue_size"`
 }
 
 func DefaultRTSPClientConfig() *RTSPClientConfig {
@@ -41,6 +42,7 @@ func DefaultRTSPClientConfig() *RTSPClientConfig {
 		ReconnectAttempts: 3,
 		ReconnectDelay:    2 * time.Second,
 		UserAgent:         "GoRTSP-Host/1.0",
+		WriteQueueSize:    4096,
 	}
 }
 
@@ -211,9 +213,10 @@ func (c *RTSPClient) attemptConnection() error {
 	defer c.mux.Unlock()
 
 	c.client = &gortsplib.Client{
-		ReadTimeout:  c.config.ReadTimeout,
-		WriteTimeout: c.config.WriteTimeout,
-		UserAgent:    c.config.UserAgent,
+		ReadTimeout:    c.config.ReadTimeout,
+		WriteTimeout:   c.config.WriteTimeout,
+		UserAgent:      c.config.UserAgent,
+		WriteQueueSize: c.config.WriteQueueSize, // added for ffmpeg-c-api-bitrate-update branch; todo: remove later
 	}
 
 	if err := c.client.StartRecording(c.rtspURL, c.description); err != nil {
