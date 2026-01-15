@@ -7,21 +7,25 @@ import (
 )
 
 type Buffer[T any] struct {
-	buffer buffer.Buffer[T]
-	ctx    context.Context
+	buffer.Buffer[T]
 }
 
 func NewBuffer[T any](ctx context.Context, bufsize int) *Buffer[T] {
 	return &Buffer[T]{
-		ctx:    ctx,
-		buffer: buffer.CreateChannelBuffer[T](ctx, bufsize, nil),
+		Buffer: buffer.NewChannelBuffer[T](ctx, uint(bufsize), 1),
 	}
 }
 
-func (b *Buffer[T]) Generate() (T, error) {
-	return b.buffer.Pop(b.ctx)
+func NewBufferGeneratorConsumer[T any](b buffer.Buffer[T]) *Buffer[T] {
+	return &Buffer[T]{
+		Buffer: b,
+	}
 }
 
-func (b *Buffer[T]) Consume(element T) error {
-	return b.buffer.Push(b.ctx, element)
+func (b *Buffer[T]) Generate(ctx context.Context) (T, error) {
+	return b.Pop(ctx)
+}
+
+func (b *Buffer[T]) Consume(ctx context.Context, element T) error {
+	return b.Push(ctx, element)
 }

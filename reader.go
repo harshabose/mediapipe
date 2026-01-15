@@ -4,46 +4,64 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"reflect"
 	"sync"
 	"time"
 
 	"github.com/harshabose/tools/pkg/buffer"
+	"github.com/harshabose/tools/pkg/cond"
 	"github.com/harshabose/tools/pkg/multierr"
 	"github.com/harshabose/tools/pkg/set"
 )
 
+// Reader pulls source values of type T from a generator and exposes them as
+// `*Data[D, T]` units, where the embedded transformer can derive D from T on
+// demand. Implementations should honor the provided context for cancellation
+// and deadlines, and return io.EOF to signal a clean end of stream.
 type Reader[D, T any] interface {
-	Read() (*Data[D, T], error)
+	Read(context.Context) (*Data[D, T], error)
 	io.Closer
 }
 
+// CanAddReader is implemented by types that support dynamically adding a
+// Reader to an existing composite (for example, a multi-reader).
 type CanAddReader[D, T any] interface {
 	AddReader(Reader[D, T])
 }
 
+// CanRemoveReader is implemented by types that support removing a Reader from
+// an existing composite.
 type CanRemoveReader[D, T any] interface {
 	RemoveReader(Reader[D, T])
 }
 
+// CanGenerate abstracts a source that can produce values of type T on demand.
+// Generate should block until a value is available, the context is canceled,
+// or an unrecoverable error occurs.
 type CanGenerate[T any] interface {
-	Generate() (T, error)
+	Generate(context.Context) (T, error)
 }
 
-type AnyReader[D, T any] struct {
+// GeneralReader adapts a `CanGenerate[T]` into a `Reader[D, T]` by pairing it
+// with a transformation function that converts T into D when `Data.Get` is
+// called. This keeps generation and transformation responsibilities separate.
+type GeneralReader[D, T any] struct {
 	generator   CanGenerate[T]     // The source data generator
 	transformer func(T) (D, error) // Function to transform T into D
 }
 
-func NewAnyReader[D, T any](generator CanGenerate[T], transformer func(T) (D, error)) *AnyReader[D, T] {
-	return &AnyReader[D, T]{
+// NewGeneralReader constructs a `GeneralReader` from a value generator and a
+// transformer function used by produced `Data` instances.
+func NewGeneralReader[D, T any](generator CanGenerate[T], transformer func(T) (D, error)) *GeneralReader[D, T] {
+	return &GeneralReader[D, T]{
 		generator:   generator,
 		transformer: transformer,
 	}
 }
 
-func NewIdentityAnyReader[T any](generator CanGenerate[T]) *AnyReader[T, T] {
-	return &AnyReader[T, T]{
+// NewIdentityGeneralReader constructs a `GeneralReader` whose transformer is
+// the identity function; i.e., T is passed through as D unchanged.
+func NewIdentityGeneralReader[T any](generator CanGenerate[T]) *GeneralReader[T, T] {
+	return &GeneralReader[T, T]{
 		generator: generator,
 		transformer: func(t T) (T, error) {
 			return t, nil // Identity transformation
@@ -51,13 +69,17 @@ func NewIdentityAnyReader[T any](generator CanGenerate[T]) *AnyReader[T, T] {
 	}
 }
 
-func (r *AnyReader[D, T]) Read() (*Data[D, T], error) {
-	t, err := r.generator.Generate()
+// Read pulls a value from the underlying generator and wraps it into a `Data`
+// using the configured transformer. If the generated value is a zero value that
+// this package treats as empty, `nil, nil` is returned to allow callers to skip
+// processing without treating it as an error.
+func (r *GeneralReader[D, T]) Read(ctx context.Context) (*Data[D, T], error) {
+	t, err := r.generator.Generate(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	if reflect.ValueOf(t).IsZero() {
+	if isZeroSafe(t) {
 		return nil, nil
 	}
 
@@ -65,44 +87,97 @@ func (r *AnyReader[D, T]) Read() (*Data[D, T], error) {
 	return e, nil
 }
 
-func (r *AnyReader[D, T]) Close() error {
+// Close implements io.Closer. GeneralReader has no resources of its own, so it
+// returns nil.
+func (r *GeneralReader[D, T]) Close() error {
 	return nil
 }
 
-type BufferedReader[D, T any] struct {
-	reader Reader[D, T]               // Direct reference to the reader
-	buffer buffer.Buffer[*Data[D, T]] // Internal buffer for storing Data elements
-	C      chan *Data[D, T]
-
-	ctx    context.Context    // Context for cancellation and cleanup
-	cancel context.CancelFunc // Function to cancel the background reading loop
-	wg     sync.WaitGroup     // WaitGroup for goroutine management
-	once   sync.Once
+// TimeoutReader decorates another Reader, applying a per-call timeout to Read
+// operations via context.WithTimeout.
+type TimeoutReader[D, T any] struct {
+	r       Reader[D, T]
+	timeout time.Duration
 }
 
-func NewBufferedReader[D, T any](ctx context.Context, reader Reader[D, T], bufsize int) *BufferedReader[D, T] {
-	ctx2, cancel := context.WithCancel(ctx)
+// NewTimeoutReader wraps an existing Reader and enforces a timeout for each
+// call to Read.
+func NewTimeoutReader[D, T any](reader Reader[D, T], timeout time.Duration) *TimeoutReader[D, T] {
+	return &TimeoutReader[D, T]{
+		r:       reader,
+		timeout: timeout,
+	}
+}
+
+// Read invokes the wrapped Reader with a derived context that times out after
+// the configured duration.
+func (r *TimeoutReader[D, T]) Read(ctx context.Context) (*Data[D, T], error) {
+	ctx2, cancel2 := context.WithTimeout(ctx, r.timeout)
+	defer cancel2()
+
+	return r.r.Read(ctx2)
+}
+
+// Close propagates Close to the wrapped Reader.
+func (r *TimeoutReader[D, T]) Close() error {
+	return r.r.Close()
+}
+
+// BufferedReader continuously pulls from an underlying Reader and stores
+// produced `Data` items into an internal buffer, decoupling production and
+// consumption rates. Reads pop from the buffer rather than the source.
+type BufferedReader[D, T any] struct {
+	reader Reader[D, T]
+	buffer buffer.Buffer[*Data[D, T]]
+
+	wg     sync.WaitGroup
+	once   sync.Once
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+// NewBufferedReader creates a BufferedReader that uses a channel-backed buffer
+// of the given size.
+func NewBufferedReader[D, T any](ctx context.Context, reader Reader[D, T], bufsize uint) *BufferedReader[D, T] {
+	ctx2, cancel2 := context.WithCancel(ctx)
+
 	r := &BufferedReader[D, T]{
 		reader: reader,
-		buffer: buffer.CreateChannelBuffer[*Data[D, T]](ctx2, bufsize, nil),
+		buffer: buffer.NewChannelBuffer[*Data[D, T]](ctx2, bufsize, 1),
 		ctx:    ctx2,
-		cancel: cancel,
+		cancel: cancel2,
 	}
 
-	r.C = r.buffer.GetChannel()
-
-	r.wg.Add(1)
 	go r.loop()
 
 	return r
 }
 
-func (r *BufferedReader[D, T]) Read() (*Data[D, T], error) {
-	return r.buffer.Pop(r.ctx)
+// NewBufferedReaderWithBuffer is a constructor of BufferedReader that accepts a custom buffer
+// implementation.
+func NewBufferedReaderWithBuffer[D, T any](ctx context.Context, reader Reader[D, T], buffer buffer.Buffer[*Data[D, T]]) *BufferedReader[D, T] {
+	ctx2, cancel2 := context.WithCancel(ctx)
+
+	r := &BufferedReader[D, T]{
+		reader: reader,
+		buffer: buffer,
+		ctx:    ctx2,
+		cancel: cancel2,
+	}
+
+	go r.loop()
+
+	return r
+}
+
+func (r *BufferedReader[D, T]) Read(ctx context.Context) (*Data[D, T], error) {
+	return r.buffer.Pop(ctx)
 }
 
 func (r *BufferedReader[D, T]) loop() {
-	defer r.Close()
+	defer r.close()
+
+	r.wg.Add(1)
 	defer r.wg.Done()
 
 	for {
@@ -110,9 +185,8 @@ func (r *BufferedReader[D, T]) loop() {
 		case <-r.ctx.Done():
 			return
 		default:
-			data, err := r.reader.Read()
+			data, err := r.reader.Read(r.ctx)
 			if err != nil {
-				// NOTE: THIS WILL CRASH READER
 				fmt.Printf("buffered reader error while reading from the reader; err: %v", err)
 				return
 			}
@@ -125,63 +199,73 @@ func (r *BufferedReader[D, T]) loop() {
 	}
 }
 
-func (r *BufferedReader[D, T]) Close() error {
-	var err error
-
+func (r *BufferedReader[D, T]) close() {
 	r.once.Do(func() {
 		if r.cancel != nil {
 			r.cancel()
 		}
 
-		if r.reader != nil {
-			if err = r.reader.Close(); err != nil {
-				return
-			}
-		}
-
-		r.wg.Wait()
+		// r.wg.Wait() // TODO: this is causing to wait for the reader who does not honour ctx; fix this asap
 	})
+}
 
-	// TODO: ADD CLOSE ON BUFFER
+// Close stops the background loop, closes the buffer, and then closes the
+// wrapped Reader.
+func (r *BufferedReader[D, T]) Close() error {
+	r.close()
+
+	r.buffer.Close()
+
+	if r.reader != nil {
+		if err := r.reader.Close(); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
+// BufferedTimedReader is similar to BufferedReader, but pulls from the
+// underlying Reader on a fixed time interval using a ticker. This is useful
+// when the source should be sampled periodically regardless of consumer speed.
 type BufferedTimedReader[D, T any] struct {
-	reader   Reader[D, T]               // Direct reference to the reader
-	buffer   buffer.Buffer[*Data[D, T]] // Internal buffer for storing Data elements
-	C        chan *Data[D, T]
-	interval time.Duration // Time interval between read operations
+	reader   Reader[D, T]
+	buffer   buffer.Buffer[*Data[D, T]]
+	interval time.Duration
 
-	ctx    context.Context    // Context for cancellation and cleanup
-	cancel context.CancelFunc // Function to cancel the background reading loop
-	wg     sync.WaitGroup     // WaitGroup for goroutine management
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 	once   sync.Once
 }
 
+// NewBufferedTimedReader creates a `BufferedTimedReader` with a channel-backed
+// buffer of the given size and a fixed read interval.
 func NewBufferedTimedReader[D, T any](ctx context.Context, reader Reader[D, T], bufsize int, interval time.Duration) *BufferedTimedReader[D, T] {
 	ctx2, cancel := context.WithCancel(ctx)
 	r := &BufferedTimedReader[D, T]{
 		reader:   reader,
-		buffer:   buffer.CreateChannelBuffer[*Data[D, T]](ctx2, bufsize, nil),
+		buffer:   buffer.NewChannelBuffer[*Data[D, T]](ctx2, uint(bufsize), 1),
 		interval: interval,
 		ctx:      ctx2,
 		cancel:   cancel,
 	}
 
-	r.C = r.buffer.GetChannel()
-
-	r.wg.Add(1)
 	go r.loop()
 
 	return r
 }
 
-func (r *BufferedTimedReader[D, T]) Read() (*Data[D, T], error) {
-	return r.buffer.Pop(r.ctx)
+// Read pops the next `Data` item from the internal buffer, blocking until
+// available or the context is canceled.
+func (r *BufferedTimedReader[D, T]) Read(ctx context.Context) (*Data[D, T], error) {
+	return r.buffer.Pop(ctx)
 }
 
 func (r *BufferedTimedReader[D, T]) loop() {
-	defer r.Close()
+	defer r.close()
+
+	r.wg.Add(1)
 	defer r.wg.Done()
 
 	ticker := time.NewTicker(r.interval)
@@ -192,7 +276,7 @@ func (r *BufferedTimedReader[D, T]) loop() {
 		case <-r.ctx.Done():
 			return
 		case <-ticker.C:
-			data, err := r.reader.Read()
+			data, err := r.reader.Read(r.ctx)
 			if err != nil {
 				fmt.Printf("buffered reader error while reading from the reader; err: %s", err.Error())
 				return
@@ -206,58 +290,67 @@ func (r *BufferedTimedReader[D, T]) loop() {
 	}
 }
 
-func (r *BufferedTimedReader[D, T]) Close() error {
-	var err error
-
+func (r *BufferedTimedReader[D, T]) close() {
 	r.once.Do(func() {
 		if r.cancel != nil {
 			r.cancel()
 		}
 
-		if r.reader != nil {
-			if err = r.reader.Close(); err != nil {
-				return
-			}
-		}
-
 		r.wg.Wait()
 	})
+}
 
-	// TODO: ADD CLOSE ON BUFFER
+// Close stops the background loop, closes the buffer, and closes the wrapped
+// reader.
+func (r *BufferedTimedReader[D, T]) Close() error {
+	r.close()
+
+	r.buffer.Close()
+
+	if r.reader != nil {
+		if err := r.reader.Close(); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
+// MultiReader multiplexes over a dynamic set of Readers and reads from them in
+// round-robin order. Readers that error are removed automatically.
+//
+// Concurrency note: Read services one underlying Reader per call, but can be
+// called in a tight loop or from multiple goroutines to simulate concurrent
+// reads. The observed concurrency depends on call frequency and scheduling.
 type MultiReader[D, T any] struct {
-	readers     *set.Set[Reader[D, T]]
-	readerIndex int // Current reader index for round-robin scheduling
-	mux         sync.RWMutex
+	readers *set.Set[Reader[D, T]]
+
+	index int // Current reader index for round-robin scheduling
+	cond  *cond.ContextCond
+	mux   sync.RWMutex
 }
 
+// NewMultiReader constructs a MultiReader with an optional initial set of
+// Readers.
 func NewMultiReader[D, T any](readers ...Reader[D, T]) *MultiReader[D, T] {
-	return &MultiReader[D, T]{
-		readers:     set.NewSet(readers...),
-		readerIndex: 0,
+	r := &MultiReader[D, T]{
+		readers: set.NewSet(readers...),
+		index:   0,
 	}
+	r.cond = cond.NewContextCond(&r.mux)
+
+	return r
 }
 
-func (r *MultiReader[D, T]) Read() (*Data[D, T], error) {
-	r.mux.Lock()
-
-	if r.readers.Size() == 0 {
-		r.mux.Unlock()
-		return nil, fmt.Errorf("no readers available")
+// Read obtains the next Reader according to round-robin policy and delegates
+// the read to it.
+func (r *MultiReader[D, T]) Read(ctx context.Context) (*Data[D, T], error) {
+	reader, err := r.getNextReader(ctx)
+	if err != nil {
+		return nil, err
 	}
 
-	if r.readerIndex >= r.readers.Size() {
-		r.readerIndex = 0
-	}
-
-	reader := r.readers.Items()[r.readerIndex]
-	r.readerIndex = (r.readerIndex + 1) % r.readers.Size()
-
-	r.mux.Unlock()
-
-	data, err := reader.Read()
+	data, err := reader.Read(ctx)
 	if err != nil {
 		r.RemoveReader(reader)
 		return nil, err
@@ -266,13 +359,29 @@ func (r *MultiReader[D, T]) Read() (*Data[D, T], error) {
 	return data, nil
 }
 
-func (r *MultiReader[D, T]) GetReaders() []Reader[D, T] {
-	r.mux.RLock()
-	defer r.mux.RUnlock()
+// getNextReader is a blocking helper that waits for at least one Reader to be
+// present, then returns the next Reader by index.
+func (r *MultiReader[D, T]) getNextReader(ctx context.Context) (Reader[D, T], error) {
+	r.mux.Lock()
+	defer r.mux.Unlock()
 
-	return r.readers.Items()
+	for r.readers.Size() == 0 {
+		if err := r.cond.Wait(ctx); err != nil {
+			return nil, err
+		}
+	}
+
+	if r.index >= r.readers.Size() {
+		r.index = 0
+	}
+
+	reader := r.readers.Items()[r.index]
+	r.index = (r.index + 1) % r.readers.Size()
+
+	return reader, nil
 }
 
+// Size returns the number of Readers managed by the MultiReader.
 func (r *MultiReader[D, T]) Size() int {
 	r.mux.RLock()
 	defer r.mux.RUnlock()
@@ -280,6 +389,7 @@ func (r *MultiReader[D, T]) Size() int {
 	return r.readers.Size()
 }
 
+// AddReader adds a Reader to the round-robin set and signals waiting readers.
 func (r *MultiReader[D, T]) AddReader(reader Reader[D, T]) {
 	r.mux.Lock()
 	defer r.mux.Unlock()
@@ -289,8 +399,11 @@ func (r *MultiReader[D, T]) AddReader(reader Reader[D, T]) {
 	}
 
 	r.readers.Add(reader)
+
+	r.cond.Broadcast()
 }
 
+// RemoveReader removes a Reader from the set and closes it if present.
 func (r *MultiReader[D, T]) RemoveReader(reader Reader[D, T]) {
 	r.mux.Lock()
 	defer r.mux.Unlock()
@@ -317,26 +430,29 @@ func (r *MultiReader[D, T]) Close() error {
 	return merr
 }
 
+// MultiReader2 fan-in merges multiple Readers into a single buffer by wrapping
+// each added Reader with a BufferedReader that pushes into a shared buffer.
+// Removing a Reader stops its associated buffering loop but does not close the
+// shared buffer until `Close` is called.
 type MultiReader2[D, T any] struct {
-	reader      *set.Set[Reader[D, T]]
-	bufsize     int
-	readerAdded chan struct{} // Signal when reader is added
+	readers *set.SafeSet[*BufferedReader[D, T]]
+	buffer  buffer.Buffer[*Data[D, T]]
 
 	once   sync.Once
-	mux2   sync.RWMutex
 	ctx    context.Context
 	cancel context.CancelFunc
 }
 
-func NewMultiReader2[D, T any](ctx context.Context, bufsize int, readers ...Reader[D, T]) *MultiReader2[D, T] {
+// NewMultiReader2 constructs a MultiReader2 with a shared channel buffer of the
+// given size and optional initial Readers.
+func NewMultiReader2[D, T any](ctx context.Context, bufsize uint, readers ...Reader[D, T]) *MultiReader2[D, T] {
 	ctx2, cancel2 := context.WithCancel(ctx)
 
 	r := &MultiReader2[D, T]{
-		reader:      set.NewSet[Reader[D, T]](),
-		bufsize:     bufsize,
-		readerAdded: make(chan struct{}, 1),
-		ctx:         ctx2,
-		cancel:      cancel2,
+		readers: set.NewSafeSet[*BufferedReader[D, T]](),
+		buffer:  buffer.NewChannelBuffer[*Data[D, T]](ctx2, bufsize, 1),
+		ctx:     ctx2,
+		cancel:  cancel2,
 	}
 
 	if len(readers) > 0 {
@@ -348,138 +464,86 @@ func NewMultiReader2[D, T any](ctx context.Context, bufsize int, readers ...Read
 	return r
 }
 
+// AddReader wraps the given Reader in a BufferedReader that writes into the
+// shared buffer.
 func (r *MultiReader2[D, T]) AddReader(reader Reader[D, T]) {
-	r.mux2.Lock()
-	defer r.mux2.Unlock()
-
 	if reader == nil {
 		return
 	}
 
-	bufr, ok := reader.(*BufferedReader[D, T])
-	if !ok {
-		bufr = NewBufferedReader(r.ctx, reader, r.bufsize)
-	}
-
-	r.reader.Add(bufr)
-
-	// Signal that a reader was added (non-blocking)
-	select {
-	case r.readerAdded <- struct{}{}:
-	default:
-	}
+	r.readers.Add(NewBufferedReaderWithBuffer(r.ctx, reader, r.buffer))
 }
 
+// RemoveReader stops the buffering loop for the specified Reader, without
+// closing the shared buffer.
 func (r *MultiReader2[D, T]) RemoveReader(reader Reader[D, T]) {
-	r.mux2.Lock()
-	defer r.mux2.Unlock()
-
 	if reader == nil {
 		return
 	}
 
-	r.reader.RemoveIf(func(r Reader[D, T]) bool {
-		if r == nil {
-			return false
+	r.readers.RemoveIf(func(r2 *BufferedReader[D, T]) bool {
+		if r2 == nil {
+			return true // NOTE: REMOVE ANY INVALID READERS
 		}
 
-		bufr, ok := r.(*BufferedReader[D, T])
-		if !ok {
-			return false
+		if r2.reader == reader || r2 == reader {
+			// NOTE: DOES NOT CLOSE BUFFER; ONLY STOPS THE READ BUFFER LOOP
+			// NOTE: THIS IS INTENTIONAL; reader IS ASSUMED TO BE OWNED BY THE CALLER NOT MultiReader2
+			// NOTE: ALL READERS CAN BE CLOSE MY MANUALLY CALLING Close ON MultiReader2
+			r2.close()
+			return true
 		}
 
-		return bufr.reader == reader
+		return false
 	})
 }
 
-func (r *MultiReader2[D, T]) Read() (*Data[D, T], error) {
-	for {
-		r.mux2.RLock()
-		size := r.reader.Size()
-		r.mux2.RUnlock()
-
-		if size == 0 {
-			// Block until reader is added or context cancelled
-			select {
-			case <-r.readerAdded:
-				continue // Retry reading
-			case <-r.ctx.Done():
-				return nil, r.ctx.Err()
-			}
-		}
-
-		readers := r.reader.Items()
-		cases := make([]reflect.SelectCase, 0, len(readers)+1)
-
-		for _, reader := range readers {
-			bufr, ok := reader.(*BufferedReader[D, T])
-			if !ok {
-				continue
-			}
-			cases = append(cases, reflect.SelectCase{
-				Dir:  reflect.SelectRecv,
-				Chan: reflect.ValueOf(bufr.C),
-			})
-		}
-
-		cases = append(cases, reflect.SelectCase{
-			Dir:  reflect.SelectRecv,
-			Chan: reflect.ValueOf(r.ctx.Done()),
-		})
-
-		chosen, value, ok := reflect.Select(cases)
-
-		if chosen == len(cases)-1 {
-			return nil, r.ctx.Err()
-		}
-
-		if !ok {
-			// Channel closed, remove reader and retry, usually means reader error
-			r.mux2.Lock()
-			if chosen < len(readers) {
-				r.reader.Remove(readers[chosen])
-			}
-			r.mux2.Unlock()
-			continue
-		}
-
-		data, ok := value.Interface().(*Data[D, T])
-		if !ok {
-			return nil, fmt.Errorf("unexpected data type from reader")
-		}
-
-		return data, nil
-	}
+// Read pops the next item from the shared buffer.
+func (r *MultiReader2[D, T]) Read(ctx context.Context) (*Data[D, T], error) {
+	// NOTE: THIS DOES NOT INTERACT WITH THE ACTUAL READERS; SO AUTO REMOVE WHEN ERROR DOES NOT WORK HERE
+	return r.buffer.Pop(ctx)
 }
 
+func (r *MultiReader2[D, T]) Size() int {
+	return r.readers.Size()
+}
+
+// Close stops all internal buffering loops, closes all wrapped Readers, and
+// closes the shared buffer.
 func (r *MultiReader2[D, T]) Close() error {
-	var merr error = nil
+	var merr error
+
 	r.once.Do(func() {
 		if r.cancel != nil {
 			r.cancel()
 		}
 
-		for _, reader := range r.reader.Items() {
-			if err := reader.Close(); err != nil {
-				merr = multierr.Append(merr, err)
-			}
+		for _, reader := range r.readers.Items() {
+			merr = multierr.Append(merr, reader.Close())
 		}
+
+		r.buffer.Close()
 	})
 
 	return merr
 }
 
+// SwappableReader allows hot-swapping the underlying Reader at runtime. Swap
+// closes the old Reader before installing the new one.
 type SwappableReader[D, T any] struct {
 	reader Reader[D, T]
 	mux    sync.RWMutex
 }
 
+// NewSwappableReader constructs a SwappableReader around the provided Reader.
 func NewSwappableReader[D, T any](reader Reader[D, T]) *SwappableReader[D, T] {
 	return &SwappableReader[D, T]{
 		reader: reader,
 	}
 }
 
+// Swap replaces the current Reader with the provided one, closing the previous
+// Reader atomically under a write lock.
 func (r *SwappableReader[D, T]) Swap(reader Reader[D, T]) error {
 	r.mux.Lock()
 	defer r.mux.Unlock()
@@ -492,65 +556,18 @@ func (r *SwappableReader[D, T]) Swap(reader Reader[D, T]) error {
 	return nil
 }
 
-func (r *SwappableReader[D, T]) Read() (*Data[D, T], error) {
+// Read delegates to the current underlying Reader under a read lock.
+func (r *SwappableReader[D, T]) Read(ctx context.Context) (*Data[D, T], error) {
 	r.mux.RLock()
 	defer r.mux.RUnlock()
 
-	return r.reader.Read()
+	return r.reader.Read(ctx)
 }
 
+// Close closes the current underlying Reader under a write lock.
 func (r *SwappableReader[D, T]) Close() error {
 	r.mux.Lock()
 	defer r.mux.Unlock()
 
 	return r.reader.Close()
-}
-
-type CtxReader[D, T any] struct {
-	r Reader[D, T]
-
-	once   sync.Once
-	ctx    context.Context
-	cancel context.CancelFunc
-}
-
-func NewCtxReader[D, T any](ctx context.Context, reader Reader[D, T]) *CtxReader[D, T] {
-	ctx2, cancel2 := context.WithCancel(ctx)
-	return &CtxReader[D, T]{
-		r:      reader,
-		ctx:    ctx2,
-		cancel: cancel2,
-	}
-}
-
-func (r *CtxReader[D, T]) Done() <-chan struct{} {
-	return r.ctx.Done()
-}
-
-func (r *CtxReader[D, T]) Read() (*Data[D, T], error) {
-	select {
-	case <-r.ctx.Done():
-		return nil, r.ctx.Err()
-	default:
-		data, err := r.r.Read()
-		if err != nil {
-			r.cancel()
-			return nil, err
-		}
-
-		return data, nil
-	}
-}
-
-func (r *CtxReader[D, T]) Close() error {
-	var err error
-	r.once.Do(func() {
-		if r.cancel != nil {
-			r.cancel()
-		}
-
-		err = r.r.Close()
-	})
-
-	return err
 }

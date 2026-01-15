@@ -12,8 +12,8 @@ import (
 )
 
 type DIO struct {
-	*consumers.DIOWriter
-	*generators.DIOReader
+	*consumers.IOWriter
+	*generators.IOReader
 }
 
 func NewDIO(dc *webrtc.DataChannel, size uint16) (*DIO, error) {
@@ -31,19 +31,7 @@ func NewDIO(dc *webrtc.DataChannel, size uint16) (*DIO, error) {
 	}
 
 	return &DIO{
-		DIOWriter: consumers.NewDIOWriter(rw, size),
-		DIOReader: generators.NewDIOReader(rw, size),
+		IOWriter: consumers.NewIOWriter(rw, size),
+		IOReader: generators.NewIOReader(rw, size),
 	}, nil
-}
-
-func (rw *DIO) Close() error {
-	if err := rw.DIOWriter.Close(); err != nil {
-		return err
-	}
-
-	if err := rw.DIOReader.Close(); err != nil {
-		return err
-	}
-
-	return nil
 }

@@ -244,10 +244,10 @@ func (c *RTSPClient) monitorConnection() {
 	}
 }
 
-func (c *RTSPClient) Consume(packet *rtp.Packet) error {
+func (c *RTSPClient) Consume(_ context.Context, packet *rtp.Packet) error {
 	select {
 	case <-c.ctx.Done():
-		return context.Canceled
+		return c.ctx.Err()
 	default:
 		if packet == nil {
 			// Gracefully handle nil packets (common in some pipeline scenarios)

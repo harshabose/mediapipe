@@ -142,11 +142,11 @@ func NewLocalNet(ctx context.Context, ip string, options ...LoopBackOption) (*Lo
 	return l, nil
 }
 
-func (l *LocalUDP) Consume(payload []byte) error {
-	return l.write(payload)
+func (l *LocalUDP) Consume(ctx context.Context, payload []byte) error {
+	return l.write(ctx, payload)
 }
 
-func (l *LocalUDP) write(payload []byte) error {
+func (l *LocalUDP) write(_ context.Context, payload []byte) error {
 	select {
 	case <-l.ctx.Done():
 		return fmt.Errorf("context cancelled: %w", l.ctx.Err())
@@ -192,8 +192,8 @@ func (l *LocalUDP) write(payload []byte) error {
 	return nil
 }
 
-func (l *LocalUDP) Generate() ([]byte, error) {
-	data, err := l.read()
+func (l *LocalUDP) Generate(ctx context.Context) ([]byte, error) {
+	data, err := l.read(ctx)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil, err
@@ -205,13 +205,14 @@ func (l *LocalUDP) Generate() ([]byte, error) {
 	return data, nil
 }
 
-func (l *LocalUDP) read() ([]byte, error) {
+func (l *LocalUDP) read(_ context.Context) ([]byte, error) {
 	select {
 	case <-l.ctx.Done():
 		return nil, l.ctx.Err()
 	default:
 	}
 
+	// TODO: CHANGE THIS TO WORK WITH contex.Context INSTEAD
 	// Set read timeout to allow periodic context checking
 	if err := l.bind.conn.SetReadDeadline(time.Now().Add(1 * time.Second)); err != nil {
 		l.metrics.AddErrors(err)
@@ -252,8 +253,6 @@ func (l *LocalUDP) Close() error {
 	l.mux.Lock()
 	defer l.mux.Unlock()
 
-	fmt.Println("Closing LocalUDP...")
-
 	if l.cancel != nil {
 		l.cancel()
 	}
@@ -272,7 +271,6 @@ func (l *LocalUDP) Close() error {
 		}
 	}
 
-	fmt.Println("LocalUDP closed")
 	return err
 }
 

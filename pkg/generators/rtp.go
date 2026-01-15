@@ -1,6 +1,8 @@
 package generators
 
 import (
+	"context"
+
 	"github.com/pion/interceptor"
 	"github.com/pion/rtp"
 )
@@ -19,7 +21,7 @@ func NewPionRTPGenerator(generator CanGeneratePionRTPPacket) *PionRTPGenerator {
 	}
 }
 
-func (g *PionRTPGenerator) Generate() (*rtp.Packet, error) {
+func (g *PionRTPGenerator) Generate(_ context.Context) (*rtp.Packet, error) {
 	p, _, err := g.generator.ReadRTP()
 	return p, err
 }

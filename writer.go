@@ -8,51 +8,57 @@ import (
 	"time"
 
 	"github.com/harshabose/tools/pkg/buffer"
+	"github.com/harshabose/tools/pkg/cond"
 	"github.com/harshabose/tools/pkg/multierr"
 	"github.com/harshabose/tools/pkg/set"
 )
 
+// Writer consumes `*Data[D, T]` units produced by a Reader. Implementations
+// should extract the destination value D (typically via `Data.Get`) and send
+// it to an external sink. Writers must honor context cancellation and deadlines
+// and may return io.EOF to signal that no more data should be written.
 type Writer[D, T any] interface {
-	Write(*Data[D, T]) error
+	Write(context.Context, *Data[D, T]) error
 	io.Closer
 }
 
+// CanAddWriter is implemented by composites that support adding another Writer
+// at runtime.
 type CanAddWriter[D, T any] interface {
 	AddWriter(Writer[D, T])
 }
 
+// CanRemoveWriter is implemented by composites that support removing a Writer
+// at runtime.
 type CanRemoveWriter[D, T any] interface {
 	RemoveWriter(Writer[D, T])
 }
 
+// CanConsume abstracts a sink that can accept values of type D.
 type CanConsume[D any] interface {
-	Consume(D) error
+	Consume(context.Context, D) error
 }
 
-type AnyWriter[D, T any] struct {
+// GeneralWriter adapts a `CanConsume[D]` into a `Writer[D, T]`. It typically
+// calls `Get` on incoming `Data[D, T]` to obtain D and forwards it to the
+// consumer. An optional transformer is reserved for future use.
+type GeneralWriter[D, T any] struct {
 	consumer    CanConsume[D]      // The destination that will consume the data
 	transformer func(D) (T, error) // Optional transformer for future use
 }
 
-func NewAnyWriter[D, T any](consumer CanConsume[D], transformer func(D) (T, error)) *AnyWriter[D, T] {
-	return &AnyWriter[D, T]{
+// NewGeneralWriter constructs a `GeneralWriter` with the given consumer.
+func NewGeneralWriter[D, T any](consumer CanConsume[D], transformer func(D) (T, error)) *GeneralWriter[D, T] {
+	return &GeneralWriter[D, T]{
 		consumer:    consumer,
 		transformer: transformer,
 	}
 }
 
-func NewAnyMultiWriters[D, T any](transformer func(D) (T, error), consumers []CanConsume[D]) []*AnyWriter[D, T] {
-	var writers = make([]*AnyWriter[D, T], 0)
-
-	for _, consumer := range consumers {
-		writers = append(writers, NewAnyWriter[D, T](consumer, transformer))
-	}
-
-	return writers
-}
-
-func NewIdentityAnyWriter[D any](consumer CanConsume[D]) *AnyWriter[D, D] {
-	return &AnyWriter[D, D]{
+// NewIdentityGeneralWriter constructs a `GeneralWriter` whose internal
+// transformer is the identity function.
+func NewIdentityGeneralWriter[D any](consumer CanConsume[D]) *GeneralWriter[D, D] {
+	return &GeneralWriter[D, D]{
 		consumer: consumer,
 		transformer: func(d D) (D, error) {
 			return d, nil
@@ -60,7 +66,9 @@ func NewIdentityAnyWriter[D any](consumer CanConsume[D]) *AnyWriter[D, D] {
 	}
 }
 
-func (w *AnyWriter[D, T]) Write(data *Data[D, T]) error {
+// Write extracts the destination value via `data.Get()` and forwards it to the
+// underlying consumer. A nil `data` is a no-op.
+func (w *GeneralWriter[D, T]) Write(ctx context.Context, data *Data[D, T]) error {
 	if data == nil {
 		return nil
 	}
@@ -70,47 +78,97 @@ func (w *AnyWriter[D, T]) Write(data *Data[D, T]) error {
 		return err
 	}
 
-	return w.consumer.Consume(d)
+	return w.consumer.Consume(ctx, d)
 }
 
-func (w *AnyWriter[D, T]) Close() error {
+// Close implements io.Closer. GeneralWriter does not own resources and returns
+// nil.
+func (w *GeneralWriter[D, T]) Close() error {
 	return nil
 }
 
-type BufferedWriter[D, T any] struct {
-	writer Writer[D, T]               // Direct reference to the underlying writer
-	buffer buffer.Buffer[*Data[D, T]] // Internal buffer for storing Data elements
-	C      chan *Data[D, T]
-
-	ctx    context.Context    // Context for cancellation and cleanup
-	cancel context.CancelFunc // Function to cancel the background writing loop
-	wg     sync.WaitGroup     // WaitGroup for goroutine management
-	once   sync.Once
+// TimeoutWriter decorates another Writer and enforces a per-call timeout on
+// Write operations.
+type TimeoutWriter[D, T any] struct {
+	w       Writer[D, T]
+	timeout time.Duration
 }
 
-func NewBufferedWriter[D, T any](ctx context.Context, writer Writer[D, T], bufsize int) *BufferedWriter[D, T] {
+// NewTimeoutWriter wraps an existing Writer with the given timeout.
+func NewTimeoutWriter[D, T any](writer Writer[D, T], timeout time.Duration) *TimeoutWriter[D, T] {
+	return &TimeoutWriter[D, T]{
+		w:       writer,
+		timeout: timeout,
+	}
+}
+
+// Write invokes the wrapped Writer with a context that times out after the
+// configured duration.
+func (w *TimeoutWriter[D, T]) Write(ctx context.Context, data *Data[D, T]) error {
+	ctx2, cancel2 := context.WithTimeout(ctx, w.timeout)
+	defer cancel2()
+
+	return w.w.Write(ctx2, data)
+}
+
+// Close propagates Close to the wrapped Writer.
+func (w *TimeoutWriter[D, T]) Close() error {
+	return w.w.Close()
+}
+
+// BufferedWriter decouples production from consumption: writes are enqueued
+// into an internal buffer and a background loop flushes them to the underlying
+// Writer.
+type BufferedWriter[D, T any] struct {
+	writer Writer[D, T]
+	buffer buffer.Buffer[*Data[D, T]]
+
+	wg     sync.WaitGroup
+	once   sync.Once
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+// NewBufferedWriter creates a BufferedWriter backed by a channel buffer of the
+// specified size.
+func NewBufferedWriter[D, T any](ctx context.Context, writer Writer[D, T], bufsize uint) *BufferedWriter[D, T] {
 	ctx2, cancel := context.WithCancel(ctx)
 	w := &BufferedWriter[D, T]{
 		writer: writer,
-		buffer: buffer.CreateChannelBuffer[*Data[D, T]](ctx2, bufsize, nil),
+		buffer: buffer.NewChannelBuffer[*Data[D, T]](ctx2, bufsize, 1),
 		ctx:    ctx2,
 		cancel: cancel,
 	}
 
-	w.C = w.buffer.GetChannel()
-
-	w.wg.Add(1)
 	go w.loop()
 
 	return w
 }
 
-func (w *BufferedWriter[D, T]) Write(data *Data[D, T]) error {
-	return w.buffer.Push(w.ctx, data)
+func NewBufferedWriterWithBuffer[D, T any](ctx context.Context, writer Writer[D, T], buf buffer.Buffer[*Data[D, T]]) *BufferedWriter[D, T] {
+	ctx2, cancel := context.WithCancel(ctx)
+	w := &BufferedWriter[D, T]{
+		writer: writer,
+		buffer: buf,
+		ctx:    ctx2,
+		cancel: cancel,
+	}
+
+	go w.loop()
+
+	return w
+}
+
+// Write enqueues the data into the internal buffer for asynchronous flushing
+// by the background loop.
+func (w *BufferedWriter[D, T]) Write(ctx context.Context, data *Data[D, T]) error {
+	return w.buffer.Push(ctx, data)
 }
 
 func (w *BufferedWriter[D, T]) loop() {
-	defer w.Close()
+	defer w.close()
+
+	w.wg.Add(1)
 	defer w.wg.Done()
 
 	for {
@@ -124,40 +182,47 @@ func (w *BufferedWriter[D, T]) loop() {
 				return
 			}
 
-			if err := w.writer.Write(data); err != nil {
-				fmt.Printf("buffered writer error while writing to the writer; err: %v", err)
+			if err := w.writer.Write(w.ctx, data); err != nil {
+				fmt.Printf("buffered writer error while writing to the writer; err: %v\n", err)
 				return
 			}
 		}
 	}
 }
 
-func (w *BufferedWriter[D, T]) Close() error {
-	var err error
-
+func (w *BufferedWriter[D, T]) close() {
 	w.once.Do(func() {
 		if w.cancel != nil {
 			w.cancel()
 		}
 
-		if w.writer != nil {
-			if err = w.writer.Close(); err != nil {
-				return
-			}
-		}
+		// r.wg.Wait() // TODO: this is causing to wait for the writer who does not honour ctx; fix this asap
 
-		w.wg.Wait()
 	})
+}
 
-	// TODO: ADD CLOSE ON BUFFER
+// Close stops the background loop, closes the buffer, and then closes the
+// wrapped Writer.
+func (w *BufferedWriter[D, T]) Close() error {
+	w.close()
+
+	w.buffer.Close()
+
+	if w.writer != nil {
+		if err := w.writer.Close(); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
+// BufferedTimedWriter is similar to BufferedWriter, but flushes the buffer to
+// the underlying Writer at fixed time intervals using a ticker.
 type BufferedTimedWriter[D, T any] struct {
 	writer   Writer[D, T]               // Direct reference to the underlying writer
 	buffer   buffer.Buffer[*Data[D, T]] // Internal buffer for storing Data elements
 	interval time.Duration              // Time interval between writeAll operations
-	C        chan *Data[D, T]
 
 	ctx    context.Context    // Context for cancellation and cleanup
 	cancel context.CancelFunc // Function to cancel the background writing loop
@@ -165,30 +230,32 @@ type BufferedTimedWriter[D, T any] struct {
 	once   sync.Once
 }
 
+// NewBufferedTimedWriter constructs a BufferedTimedWriter with the given buffer
+// size and flush interval.
 func NewBufferedTimedWriter[D, T any](ctx context.Context, writer Writer[D, T], bufsize int, interval time.Duration) *BufferedTimedWriter[D, T] {
 	ctx2, cancel := context.WithCancel(ctx)
 	w := &BufferedTimedWriter[D, T]{
 		writer:   writer,
-		buffer:   buffer.CreateChannelBuffer[*Data[D, T]](ctx2, bufsize, nil),
+		buffer:   buffer.NewChannelBuffer[*Data[D, T]](ctx2, uint(bufsize), 1),
 		interval: interval,
 		ctx:      ctx2,
 		cancel:   cancel,
 	}
 
-	w.C = w.buffer.GetChannel()
-
-	w.wg.Add(1)
 	go w.loop()
 
 	return w
 }
 
-func (w *BufferedTimedWriter[D, T]) Write(data *Data[D, T]) error {
-	return w.buffer.Push(w.ctx, data)
+// Write enqueues the data into the internal buffer for periodic flushing.
+func (w *BufferedTimedWriter[D, T]) Write(ctx context.Context, data *Data[D, T]) error {
+	return w.buffer.Push(ctx, data)
 }
 
 func (w *BufferedTimedWriter[D, T]) loop() {
-	defer w.Close()
+	defer w.close()
+
+	w.wg.Add(1)
 	defer w.wg.Done()
 
 	ticker := time.NewTicker(w.interval)
@@ -205,67 +272,101 @@ func (w *BufferedTimedWriter[D, T]) loop() {
 				return
 			}
 
-			if err := w.writer.Write(data); err != nil {
-				fmt.Printf("buffered timed writer error while writing to the writer; err: %v", err)
+			if err := w.writer.Write(w.ctx, data); err != nil {
+				fmt.Printf("buffered timed writer error while writing to the writer; err: %v\n", err)
 				return
 			}
 		}
 	}
 }
 
-func (w *BufferedTimedWriter[D, T]) Close() error {
-	var err error
-
+func (w *BufferedTimedWriter[D, T]) close() {
 	w.once.Do(func() {
 		if w.cancel != nil {
 			w.cancel()
 		}
 
-		if w.writer != nil {
-			if err = w.writer.Close(); err != nil {
-				return
-			}
-		}
-
 		w.wg.Wait()
 	})
+}
 
-	// TODO: ADD CLOSE ON BUFFER
+// Close stops the ticker loop, closes the buffer, and then closes the wrapped
+// Writer.
+func (w *BufferedTimedWriter[D, T]) Close() error {
+	w.close()
+
+	w.buffer.Close()
+
+	if w.writer != nil {
+		if err := w.writer.Close(); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
+// MultiWriter broadcasts each write to all underlying Writers. Writers that
+// return an error are removed from the set.
 type MultiWriter[D, T any] struct {
 	writers *set.Set[Writer[D, T]]
-	mux     sync.RWMutex
+
+	index int
+	cond  *cond.ContextCond
+	mux   sync.RWMutex
 }
 
+// NewMultiWriter constructs a MultiWriter with an optional initial set of
+// Writers.
 func NewMultiWriter[D, T any](writers ...Writer[D, T]) *MultiWriter[D, T] {
-	return &MultiWriter[D, T]{
+	w := &MultiWriter[D, T]{
 		writers: set.NewSet(writers...),
+		index:   0,
 	}
+	w.cond = cond.NewContextCond(&w.mux)
+
+	return w
 }
 
-func (w *MultiWriter[D, T]) Write(data *Data[D, T]) error {
-	w.mux.RLock()
-	writers := w.writers.Items()
-	w.mux.RUnlock()
-
-	if len(writers) == 0 {
-		return nil
+// Write forwards the data to each underlying Writer, aggregating errors. Any
+// Writer that fails is removed.
+func (w *MultiWriter[D, T]) Write(ctx context.Context, data *Data[D, T]) error {
+	writer, err := w.getWriters(ctx)
+	if err != nil {
+		return err
 	}
 
-	var merr error
+	if err := writer.Write(ctx, data); err != nil {
+		w.RemoveWriter(writer)
+		return err
+	}
 
-	for _, writer := range writers {
-		if err := writer.Write(data); err != nil {
-			merr = multierr.Append(merr, err)
-			w.RemoveWriter(writer)
+	return nil
+}
+
+// getWriters blocks until at least one Writer is present and then returns a
+// snapshot slice of current Writers.
+func (w *MultiWriter[D, T]) getWriters(ctx context.Context) (Writer[D, T], error) {
+	w.mux.Lock()
+	defer w.mux.Unlock()
+
+	for w.writers.Size() == 0 {
+		if err := w.cond.Wait(ctx); err != nil {
+			return nil, err
 		}
 	}
 
-	return merr
+	if w.index >= w.writers.Size() {
+		w.index = 0
+	}
+
+	writer := w.writers.Items()[w.index]
+	w.index = (w.index + 1) % w.writers.Size()
+
+	return writer, nil
 }
 
+// AddWriter adds a Writer to the broadcast set and signals waiting writers.
 func (w *MultiWriter[D, T]) AddWriter(writer Writer[D, T]) {
 	w.mux.Lock()
 	defer w.mux.Unlock()
@@ -275,8 +376,11 @@ func (w *MultiWriter[D, T]) AddWriter(writer Writer[D, T]) {
 	}
 
 	w.writers.Add(writer)
+
+	w.cond.Broadcast()
 }
 
+// RemoveWriter removes a Writer from the broadcast set.
 func (w *MultiWriter[D, T]) RemoveWriter(writer Writer[D, T]) {
 	w.mux.Lock()
 	defer w.mux.Unlock()
@@ -288,6 +392,8 @@ func (w *MultiWriter[D, T]) RemoveWriter(writer Writer[D, T]) {
 	w.writers.Remove(writer)
 }
 
+// Close closes all Writers currently held by the MultiWriter and aggregates any
+// errors.
 func (w *MultiWriter[D, T]) Close() error {
 	w.mux.Lock()
 	defer w.mux.Unlock()
@@ -303,22 +409,28 @@ func (w *MultiWriter[D, T]) Close() error {
 	return merr
 }
 
+// MultiWriter2 wraps each added Writer with a BufferedWriter (if not already)
+// and fan-outs writes to all of them. It owns and stops the background loops
+// for those buffered wrappers on Close.
 type MultiWriter2[D, T any] struct {
-	*MultiWriter[D, T]
-	bufsize int
+	writers *set.SafeSet[*BufferedWriter[D, T]]
+	bufsize uint
 
+	once   sync.Once
 	ctx    context.Context
 	cancel context.CancelFunc
 }
 
-func NewMultiWriter2[D, T any](ctx context.Context, bufsize int, writers ...Writer[D, T]) *MultiWriter2[D, T] {
+// NewMultiWriter2 constructs a MultiWriter2 with a context for internal
+// buffered writers and an optional initial set of Writers.
+func NewMultiWriter2[D, T any](ctx context.Context, bufsize uint, writers ...Writer[D, T]) *MultiWriter2[D, T] {
 	ctx2, cancel2 := context.WithCancel(ctx)
 
 	w := &MultiWriter2[D, T]{
-		MultiWriter: NewMultiWriter[D, T](),
-		bufsize:     bufsize,
-		ctx:         ctx2,
-		cancel:      cancel2,
+		writers: set.NewSafeSet[*BufferedWriter[D, T]](),
+		bufsize: bufsize,
+		ctx:     ctx2,
+		cancel:  cancel2,
 	}
 
 	for _, writer := range writers {
@@ -328,10 +440,8 @@ func NewMultiWriter2[D, T any](ctx context.Context, bufsize int, writers ...Writ
 	return w
 }
 
+// AddWriter ensures the given Writer has buffering and adds it to the set.
 func (w *MultiWriter2[D, T]) AddWriter(writer Writer[D, T]) {
-	w.mux.Lock()
-	defer w.mux.Unlock()
-
 	if writer == nil {
 		return
 	}
@@ -344,105 +454,108 @@ func (w *MultiWriter2[D, T]) AddWriter(writer Writer[D, T]) {
 	w.writers.Add(bufw)
 }
 
+// RemoveWriter removes the specified Writer (or its buffered wrapper) from the
+// set.
 func (w *MultiWriter2[D, T]) RemoveWriter(writer Writer[D, T]) {
-	w.mux.Lock()
-	defer w.mux.Unlock()
-
 	if writer == nil {
 		return
 	}
 
-	w.writers.RemoveIf(func(w Writer[D, T]) bool {
-		bufw, ok := w.(*BufferedWriter[D, T])
-		if !ok {
-			return false
+	w.writers.RemoveIf(func(w *BufferedWriter[D, T]) bool {
+		if w == nil {
+			return true // NOTE: REMOVE ANY INVALID WRITERS
 		}
 
-		return bufw.writer == writer
+		return w.writer == writer || w == writer
 	})
 }
 
+// Write forwards the data to each buffered Writer, aggregating errors and
+// pruning failing writers.
+func (w *MultiWriter2[D, T]) Write(ctx context.Context, data *Data[D, T]) error {
+	for _, writer := range w.writers.Items() {
+		if err := writer.Write(ctx, data); err != nil {
+			fmt.Printf("error in multiwriter2: write error=%v. Removing error writer...\n", err)
+			w.RemoveWriter(writer)
+		}
+	}
+
+	return nil
+}
+
+func (w *MultiWriter2[D, T]) Size() int {
+	return w.writers.Size()
+}
+
+// Close stops internal background loops and closes all buffered Writers.
+func (w *MultiWriter2[D, T]) Close() error {
+	var merr error
+
+	w.once.Do(func() {
+		if w.cancel != nil {
+			w.cancel()
+		}
+
+		for _, writer := range w.writers.Items() {
+			merr = multierr.Append(merr, writer.Close())
+		}
+	})
+
+	return merr
+}
+
+// SwappableWriter allows hot-swapping the underlying Writer at runtime. Swap
+// closes the current Writer before installing the new one.
 type SwappableWriter[D, T any] struct {
 	writer Writer[D, T]
 	mux    sync.RWMutex
 }
 
+// NewSwappableWriter constructs a SwappableWriter around the provided Writer.
 func NewSwappableWriter[D, T any](writer Writer[D, T]) *SwappableWriter[D, T] {
 	return &SwappableWriter[D, T]{
 		writer: writer,
 	}
 }
 
-func (w *SwappableWriter[D, T]) Swap(writer Writer[D, T]) error {
-	w.mux.Lock()
-	defer w.mux.Unlock()
-
-	if err := w.writer.Close(); err != nil {
-		return fmt.Errorf("error while swapping writer (err: %v)", err)
-	}
-
-	w.writer = writer
-	return nil
-}
-
-func (w *SwappableWriter[D, T]) Write(data *Data[D, T]) error {
+// Get returns current active writer
+func (w *SwappableWriter[D, T]) Get() Writer[D, T] {
 	w.mux.RLock()
 	defer w.mux.RUnlock()
 
-	return w.writer.Write(data)
+	return w.writer
 }
 
+// Swap replaces the current Writer with the provided one and returns the previous
+func (w *SwappableWriter[D, T]) Swap(writer Writer[D, T]) Writer[D, T] {
+	w.mux.Lock()
+	defer w.mux.Unlock()
+
+	old := w.writer
+	w.writer = writer
+
+	return old
+}
+
+func (w *SwappableWriter[D, T]) Hold(ctx context.Context, writer Writer[D, T]) {
+	old := w.Swap(writer)
+	defer w.Swap(old)
+
+	<-ctx.Done()
+}
+
+// Write delegates to the current underlying Writer under a read lock.
+func (w *SwappableWriter[D, T]) Write(ctx context.Context, data *Data[D, T]) error {
+	w.mux.RLock()
+	defer w.mux.RUnlock()
+
+	return w.writer.Write(ctx, data)
+}
+
+// Close closes the current underlying Writer under a write lock.
 func (w *SwappableWriter[D, T]) Close() error {
 	w.mux.Lock()
 	defer w.mux.Unlock()
 
 	return w.writer.Close()
-}
-
-type CtxWriter[D, T any] struct {
-	w Writer[D, T]
-
-	once   sync.Once
-	ctx    context.Context
-	cancel context.CancelFunc
-}
-
-func NewCtxWriter[D, T any](ctx context.Context, writer Writer[D, T]) *CtxWriter[D, T] {
-	ctx2, cancel2 := context.WithCancel(ctx)
-	return &CtxWriter[D, T]{
-		w:      writer,
-		ctx:    ctx2,
-		cancel: cancel2,
-	}
-}
-
-func (w *CtxWriter[D, T]) Done() <-chan struct{} {
-	return w.ctx.Done()
-}
-
-func (w *CtxWriter[D, T]) Write(data *Data[D, T]) error {
-	select {
-	case <-w.Done():
-		return w.ctx.Err()
-	default:
-		if err := w.w.Write(data); err != nil {
-			w.cancel()
-			return err
-		}
-
-		return nil
-	}
-}
-
-func (w *CtxWriter[D, T]) Close() error {
-	var err error
-	w.once.Do(func() {
-		if w.cancel != nil {
-			w.cancel()
-		}
-
-		err = w.w.Close()
-	})
-
-	return err
 }

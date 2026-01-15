@@ -1,6 +1,8 @@
 package consumers
 
 import (
+	"context"
+
 	"github.com/pion/webrtc/v4/pkg/media"
 )
 
@@ -18,6 +20,6 @@ func NewPionSampleConsumer(consumer CanConsumePionSamplePacket) *PionSampleConsu
 	}
 }
 
-func (c *PionSampleConsumer) Consume(s media.Sample) error {
+func (c *PionSampleConsumer) Consume(_ context.Context, s media.Sample) error {
 	return c.consumer.WriteSample(s)
 }

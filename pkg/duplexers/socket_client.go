@@ -173,7 +173,7 @@ func (c *SocketClient) connect() {
 			}
 
 			// Connection successful
-			c.setConn(NewWebSocket(c.ctx, conn, c.config.MessageType))
+			c.setConn(NewWebSocket(conn, c.config.MessageType))
 			c.metrics.SetState(metrics.ConnectedState)
 
 			c.monitorConnection()
@@ -246,11 +246,13 @@ func (c *SocketClient) attemptConnection() (*websocket.Conn, error) {
 	return conn, err
 }
 
-func (c *SocketClient) Generate() ([]byte, error) {
+func (c *SocketClient) Generate(ctx context.Context) ([]byte, error) {
 	select {
 	case <-c.ctx.Done():
-		c.metrics.AddErrors(context.Canceled)
-		return nil, context.Canceled
+		return nil, c.ctx.Err()
+	case <-ctx.Done():
+		c.metrics.AddErrors(c.ctx.Err())
+		return nil, ctx.Err()
 	default:
 		if c.metrics.GetState() != metrics.ConnectedState {
 			err := fmt.Errorf("cannot transmit data: client state is %s, expected %s (connected)", c.metrics.GetState().String(), metrics.ConnectedState.String())
@@ -269,7 +271,7 @@ func (c *SocketClient) Generate() ([]byte, error) {
 			return nil, err
 		}
 
-		data, err := c.conn.Generate()
+		data, err := c.conn.Generate(ctx)
 		if err != nil {
 			c.metrics.SetState(metrics.ErrorState)
 			c.metrics.AddErrors(err)
@@ -291,11 +293,13 @@ func (c *SocketClient) Generate() ([]byte, error) {
 	}
 }
 
-func (c *SocketClient) Consume(data []byte) error {
+func (c *SocketClient) Consume(ctx context.Context, data []byte) error {
 	select {
 	case <-c.ctx.Done():
-		c.metrics.AddErrors(context.Canceled)
-		return context.Canceled
+		return c.ctx.Err()
+	case <-ctx.Done():
+		c.metrics.AddErrors(ctx.Err())
+		return ctx.Err()
 	default:
 		if c.metrics.GetState() != metrics.ConnectedState {
 			err := fmt.Errorf("cannot transmit data: client state is %d, expected %d (connected)", c.metrics.GetState(), metrics.ConnectedState)
@@ -314,7 +318,7 @@ func (c *SocketClient) Consume(data []byte) error {
 			return err
 		}
 
-		if err := c.conn.Consume(data); err != nil {
+		if err := c.conn.Consume(ctx, data); err != nil {
 			c.metrics.SetState(metrics.ErrorState)
 			c.metrics.AddErrors(err)
 
