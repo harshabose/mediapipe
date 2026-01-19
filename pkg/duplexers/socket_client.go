@@ -12,6 +12,12 @@ import (
 	"github.com/harshabose/tools/pkg/metrics"
 )
 
+var (
+	ErrSocketConnectionNotReady = errors.New("reader not ready yet")
+	ErrSocketWrite              = errors.New("cannot write data in current state")
+	ErrSocketRead               = errors.New("cannot read data in current state")
+)
+
 // SocketClientConfig contains all configuration parameters for the WebSocket client.
 // This includes connection details, authentication credentials, io timeouts,
 // and retry behavior.
@@ -21,9 +27,9 @@ import (
 // in production environments to protect credentials in transit.
 type SocketClientConfig struct {
 	// Connection settings
-	Addr string // WebSocket server address (e.g., "wss://example.com")
-	Port uint16 // WebSocket server port
-	Path string
+	Domain string // WebSocket server address (e.g., "wss://example.com")
+	Port   uint16 // WebSocket server port
+	Path   string
 
 	// Authentication settings // NOT IMPLEMENTED FOR NOW
 	// AuthURL  string // Authentication service URL for login
@@ -34,46 +40,46 @@ type SocketClientConfig struct {
 	MessageType websocket.MessageType // Type of WebSocket messages (Binary/Text)
 
 	// Connection management
-	KeepConnecting bool          // Whether to maintain a persistent connection
-	MaxRetry       uint8         // Maximum reconnection attempts (0 = unlimited)
-	ReconnectDelay time.Duration // Initial delay between reconnection attempts
+	ShouldReconnectIfError      bool          // Whether to maintain a persistent connection
+	MaxReconnectionAttempts     uint8         // Maximum reconnection attempts (0 = unlimited)
+	ReconnectionAttemptDelay    time.Duration // Initial delay between reconnection attempts
+	MaxReconnectionAttemptDelay time.Duration // Maximum delay
 }
 
 func (c *SocketClientConfig) updateDelay() {
-	newDelay := time.Duration(float64(c.ReconnectDelay) * 1.5)
-	if newDelay > 30*time.Second {
-		newDelay = 30 * time.Second
+	newDelay := time.Duration(float64(c.ReconnectionAttemptDelay) * 1.5)
+	if newDelay > c.MaxReconnectionAttemptDelay {
+		newDelay = c.MaxReconnectionAttemptDelay
 	}
-	c.ReconnectDelay = newDelay
+	c.ReconnectionAttemptDelay = newDelay
 }
 
 func (c *SocketClientConfig) shouldRetry(attempt uint8) bool {
-	if !c.KeepConnecting {
-		fmt.Println("Not retrying as not configured to reconnect")
+	if !c.ShouldReconnectIfError {
+		fmt.Println("not retrying as not configured to reconnect")
 		return false
 	}
 
-	if c.MaxRetry == 0 {
-		fmt.Printf("No retries configured, stopping connection attempts\n")
+	if c.MaxReconnectionAttempts == 0 {
+		fmt.Printf("no retries configured, stopping connection attempts\n")
 		return false
 	}
 
-	if c.MaxRetry > 0 && attempt >= c.MaxRetry {
-		fmt.Printf("Maximum retry attempts (%d) reached, stopping\n", c.MaxRetry)
+	if c.MaxReconnectionAttempts > 0 && attempt >= c.MaxReconnectionAttempts {
+		fmt.Printf("maximum retry attempts (%d) reached, stopping\n", c.MaxReconnectionAttempts)
 		return false
 	}
 
 	return true
 }
 
-func (c *SocketClientConfig) waitForRetry(ctx context.Context, attempt uint8) bool {
-	fmt.Printf("Retrying Websocket connection in %v (attempt %d)\n", c.ReconnectDelay, attempt+1)
+func (c *SocketClientConfig) wait(ctx context.Context, attempt uint8) bool {
+	fmt.Printf("retrying socket connection in %v (attempt %d)\n", c.ReconnectionAttemptDelay, attempt+1)
 
 	select {
 	case <-ctx.Done():
-		fmt.Printf("Websocket connection manager stopping during retry delay\n")
 		return false
-	case <-time.After(c.ReconnectDelay):
+	case <-time.After(c.ReconnectionAttemptDelay):
 		return true
 	}
 }
@@ -116,11 +122,15 @@ func (c *SocketClient) WaitForConnection(timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(c.ctx, timeout)
 	defer cancel()
 
+	ticker := time.NewTicker(timeout / 10)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		default:
+		case <-ticker.C:
+
 			c.mux.RLock()
 			connected := c.conn != nil
 			c.mux.RUnlock()
@@ -128,8 +138,6 @@ func (c *SocketClient) WaitForConnection(timeout time.Duration) error {
 			if connected && c.metrics.GetState() == metrics.ConnectedState {
 				return nil
 			}
-
-			time.Sleep(10 * time.Millisecond)
 		}
 	}
 }
@@ -162,7 +170,7 @@ func (c *SocketClient) connect() {
 					return
 				}
 
-				if !c.config.waitForRetry(c.ctx, attempt) {
+				if !c.config.wait(c.ctx, attempt) {
 					return
 				}
 
@@ -183,7 +191,7 @@ func (c *SocketClient) connect() {
 				return
 			}
 
-			if !c.config.waitForRetry(c.ctx, attempt) {
+			if !c.config.wait(c.ctx, attempt) {
 				return
 			}
 
@@ -212,7 +220,7 @@ func (c *SocketClient) monitorConnection() {
 		case <-c.ctx.Done():
 			return
 		case <-c.reconnect:
-			fmt.Println("Triggered websocket reconnection due to some error")
+			fmt.Println("received reconnection request: triggering websocket reconnection...")
 			return
 		case <-ticker.C:
 			if time.Since(c.metrics.GetLastWriteTime()) > 60*time.Second || time.Since(c.metrics.GetLastReadTime()) > 60*time.Second {
@@ -223,6 +231,7 @@ func (c *SocketClient) monitorConnection() {
 }
 
 func (c *SocketClient) attemptConnection() (*websocket.Conn, error) {
+	// removed; needs more development
 	// if err := c.performLogin(); err != nil {
 	// 	return nil, err
 	// }
@@ -232,12 +241,12 @@ func (c *SocketClient) attemptConnection() (*websocket.Conn, error) {
 	// 	return errors.New("token is not valid")
 	// }
 
-	// conn, _, err := websocket.Dial(c.ctx, fmt.Sprintf("%s:%d?token=%s", c.config.Addr, c.config.Port, token), nil)
+	// conn, _, err := websocket.Dial(c.ctx, fmt.Sprintf("%s:%d?token=%s", c.config.Domain, c.config.Port, token), nil)
 	// if err != nil {
 	// 	return err
 	// }
 
-	url := fmt.Sprintf("%s:%d%s", c.config.Addr, c.config.Port, c.config.Path)
+	url := fmt.Sprintf("%s:%d%s", c.config.Domain, c.config.Port, c.config.Path)
 	conn, _, err := websocket.Dial(c.ctx, url, nil)
 	if err != nil {
 		return nil, err
@@ -251,38 +260,29 @@ func (c *SocketClient) Generate(ctx context.Context) ([]byte, error) {
 	case <-c.ctx.Done():
 		return nil, c.ctx.Err()
 	case <-ctx.Done():
-		c.metrics.AddErrors(c.ctx.Err())
-		return nil, ctx.Err()
+		return nil, fmt.Errorf("error while calling Generate on SocketClient: %w", ctx.Err())
 	default:
 		if c.metrics.GetState() != metrics.ConnectedState {
-			err := fmt.Errorf("cannot transmit data: client state is %s, expected %s (connected)", c.metrics.GetState().String(), metrics.ConnectedState.String())
-			c.metrics.AddErrors(err)
-			fmt.Println(err.Error())
-			return nil, err
+			c.metrics.AddErrors(fmt.Errorf("cannot transmit data: client state is %s, expected %s (connected)", c.metrics.GetState().String(), metrics.ConnectedState.String()))
+			return nil, ErrSocketWrite
 		}
 
 		c.mux.RLock()
 		defer c.mux.RUnlock()
 
 		if c.conn == nil {
-			err := errors.New("reader not ready yet")
-			c.metrics.AddErrors(err)
-			fmt.Println(err.Error())
-			return nil, err
+			c.metrics.AddErrors(ErrSocketConnectionNotReady)
+			return nil, ErrSocketConnectionNotReady
 		}
 
 		data, err := c.conn.Generate(ctx)
 		if err != nil {
 			c.metrics.SetState(metrics.ErrorState)
-			c.metrics.AddErrors(err)
+			c.metrics.AddErrors(fmt.Errorf("failed to read data from websocket server: %w", err))
 
-			select {
-			case c.reconnect <- struct{}{}:
-			default:
-				// Channel full, reconnection already pending
-			}
+			c.triggerReconnection()
 
-			return nil, fmt.Errorf("failed to read data from websocket server: %w", err)
+			return nil, ErrSocketWrite
 		}
 
 		c.metrics.IncrementPacketsRead()
@@ -290,6 +290,14 @@ func (c *SocketClient) Generate(ctx context.Context) ([]byte, error) {
 		c.metrics.SetLastReadTime(time.Now())
 
 		return data, nil
+	}
+}
+
+func (c *SocketClient) triggerReconnection() {
+	select {
+	case c.reconnect <- struct{}{}:
+	default:
+		// Channel full, reconnection already pending
 	}
 }
 
@@ -302,33 +310,25 @@ func (c *SocketClient) Consume(ctx context.Context, data []byte) error {
 		return ctx.Err()
 	default:
 		if c.metrics.GetState() != metrics.ConnectedState {
-			err := fmt.Errorf("cannot transmit data: client state is %d, expected %d (connected)", c.metrics.GetState(), metrics.ConnectedState)
-			c.metrics.AddErrors(err)
-			fmt.Println(err.Error())
-			return err
+			c.metrics.AddErrors(fmt.Errorf("cannot transmit data: client state is %s, expected %s (connected)", c.metrics.GetState().String(), metrics.ConnectedState.String()))
+			return ErrSocketRead
 		}
 
 		c.mux.RLock()
 		defer c.mux.RUnlock()
 
 		if c.conn == nil {
-			err := errors.New("writer not ready yet")
-			c.metrics.AddErrors(err)
-			fmt.Println(err.Error())
-			return err
+			c.metrics.AddErrors(ErrSocketConnectionNotReady)
+			return ErrSocketConnectionNotReady
 		}
 
 		if err := c.conn.Consume(ctx, data); err != nil {
 			c.metrics.SetState(metrics.ErrorState)
-			c.metrics.AddErrors(err)
+			c.metrics.AddErrors(fmt.Errorf("failed to write data to websocket server: %w", err))
 
-			select {
-			case c.reconnect <- struct{}{}:
-			default:
-				// Channel full, reconnection already pending
-			}
+			c.triggerReconnection()
 
-			return fmt.Errorf("failed to write data to websocket server: %w", err)
+			return ErrSocketRead
 		}
 
 		c.metrics.IncrementPacketsWritten()
