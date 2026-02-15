@@ -2,6 +2,7 @@ package duplexers
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/coder/websocket"
 )
@@ -16,6 +17,14 @@ func NewWebSocket(conn *websocket.Conn, msgType websocket.MessageType) *Websocke
 		conn:        conn,
 		messageType: msgType,
 	}
+}
+
+func (r *Websocket) Ping(ctx context.Context) error {
+	if r.conn == nil {
+		return nil
+	}
+
+	return r.conn.Ping(ctx)
 }
 
 func (r *Websocket) Generate(ctx context.Context) ([]byte, error) {
@@ -34,10 +43,8 @@ func (r *Websocket) Consume(ctx context.Context, data []byte) error {
 	return nil
 }
 
-func (r *Websocket) Close() error {
+func (r *Websocket) Close() {
 	if err := r.conn.Close(websocket.StatusNormalClosure, "terminated"); err != nil {
-		return err
+		fmt.Printf("Websocket: error while closing err=%v\n", err)
 	}
-
-	return nil
 }

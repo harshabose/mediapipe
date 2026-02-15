@@ -41,6 +41,12 @@ type CanGenerate[T any] interface {
 	Generate(context.Context) (T, error)
 }
 
+type CanGenerateFunc[T any] func(context.Context) (T, error)
+
+func (f CanGenerateFunc[T]) Generate(ctx context.Context) (T, error) {
+	return f(ctx)
+}
+
 // GeneralReader adapts a `CanGenerate[T]` into a `Reader[D, T]` by pairing it
 // with a transformation function that converts T into D when `Data.Get` is
 // called. This keeps generation and transformation responsibilities separate.
@@ -187,12 +193,12 @@ func (r *BufferedReader[D, T]) loop() {
 		default:
 			data, err := r.reader.Read(r.ctx)
 			if err != nil {
-				fmt.Printf("buffered reader error while reading from the reader; err: %v", err)
+				// fmt.Printf("buffered reader error while reading from the reader; err: %v", err)
 				return
 			}
 
 			if err := r.buffer.Push(r.ctx, data); err != nil {
-				fmt.Printf("buffered reader error while pushing into buffer; err: %v", err)
+				// fmt.Printf("buffered reader error while pushing into buffer; err: %v", err)
 				return
 			}
 		}
@@ -278,12 +284,12 @@ func (r *BufferedTimedReader[D, T]) loop() {
 		case <-ticker.C:
 			data, err := r.reader.Read(r.ctx)
 			if err != nil {
-				fmt.Printf("buffered reader error while reading from the reader; err: %s", err.Error())
+				// fmt.Printf("buffered reader error while reading from the reader; err: %s", err.Error())
 				return
 			}
 
 			if err := r.buffer.Push(r.ctx, data); err != nil {
-				fmt.Printf("buffered reader error while pushing into buffer; err: %s", err.Error())
+				// fmt.Printf("buffered reader error while pushing into buffer; err: %s", err.Error())
 				return
 			}
 		}
@@ -553,6 +559,7 @@ func (r *SwappableReader[D, T]) Swap(reader Reader[D, T]) error {
 	}
 
 	r.reader = reader
+
 	return nil
 }
 
@@ -570,4 +577,131 @@ func (r *SwappableReader[D, T]) Close() error {
 	defer r.mux.Unlock()
 
 	return r.reader.Close()
+}
+
+type CanWeightReader[D, T any] interface {
+	Reader[D, T]
+	Weight() int64
+}
+
+type WeightReader[D, T any] struct {
+	Reader[D, T]
+	f func() int64
+}
+
+func NewWeightReader[D, T any](writer Writer[D, T], f func() int64) WeightWriter[D, T] {
+	return WeightWriter[D, T]{
+		Writer: writer,
+		f:      f,
+	}
+}
+
+func (r *WeightReader[D, T]) Weight() int64 {
+	return r.f()
+}
+
+type WeightedReader[D, T any] struct {
+	readers *set.SafeSet[CanWeightReader[D, T]]
+
+	// high determines the selection strategy:
+	// true = pick the highest weight
+	// false = pick the lowest weight
+	high bool
+}
+
+func NewWeightedReader[D, T any](high bool, readers ...CanWeightReader[D, T]) *WeightedReader[D, T] {
+	r := &WeightedReader[D, T]{
+		readers: set.NewSafeSet[CanWeightReader[D, T]](),
+		high:    high,
+	}
+
+	if len(readers) > 0 {
+		for _, reader := range readers {
+			r.AddReader(reader)
+		}
+	}
+
+	return r
+}
+
+func (r *WeightedReader[D, T]) AddReader(reader Reader[D, T]) {
+	if reader == nil {
+		return
+	}
+
+	wr, ok := reader.(CanWeightReader[D, T])
+	if !ok {
+		fmt.Printf("weight reader: added reader should satisfy CanWeightReader[D, T] interface. ignoring...\n")
+		return
+	}
+
+	r.readers.Add(wr)
+}
+
+func (r *WeightedReader[D, T]) RemoveReader(reader Reader[D, T]) {
+	if reader == nil {
+		return
+	}
+
+	r.readers.RemoveIf(func(wr CanWeightReader[D, T]) bool {
+		if wr == nil && wr == reader {
+			return true
+		}
+		return false
+	})
+}
+
+func (r *WeightedReader[D, T]) Read(ctx context.Context) (*Data[D, T], error) {
+	var (
+		first               = true
+		weight int64        = 0
+		wr     Reader[D, T] = nil
+	)
+
+	for _, reader := range r.readers.Items() {
+		cw := reader.Weight()
+
+		if first {
+			wr = reader
+			weight = cw
+			first = false
+		}
+
+		if (r.high && cw > weight) || (!r.high && cw < weight) {
+			wr = reader
+			weight = cw
+		}
+	}
+
+	if wr == nil {
+		// return nil, errors.New("weighted reader: no readers available")
+		return nil, nil // returning error stops pipe
+	}
+
+	data, err := wr.Read(ctx)
+	if err != nil {
+		r.RemoveReader(wr)
+
+		return r.Read(ctx)
+	}
+
+	return data, nil
+}
+
+func (r *WeightedReader[D, T]) Size() int {
+	return r.readers.Size()
+}
+
+func (r *WeightedReader[D, T]) Close() error {
+	var merr error = nil
+
+	for _, reader := range r.readers.Items() {
+		if err := reader.Close(); err != nil {
+			merr = multierr.Append(merr, err)
+		}
+	}
+
+	r.readers.Clear()
+
+	return merr
 }

@@ -3,14 +3,14 @@ package mediapipe
 import "context"
 
 type Transformer[D, T any] struct {
-	*GenerateTransformer[D, T]
-	*ConsumerTransformer[D, T]
+	CanGenerate[D]
+	CanConsume[D]
 }
 
 func NewTransformer[D, T any](g *GenerateTransformer[D, T], c *ConsumerTransformer[D, T]) *Transformer[D, T] {
 	return &Transformer[D, T]{
-		GenerateTransformer: g,
-		ConsumerTransformer: c,
+		CanGenerate: g,
+		CanConsume:  c,
 	}
 }
 
@@ -20,7 +20,7 @@ type GenerateTransformer[D, T any] struct {
 	transformer func(T) (D, error)
 }
 
-func NewGenerateTransformer[D, T any](generator CanGenerate[T], transformer func(T) (D, error)) *GenerateTransformer[D, T] {
+func NewGenerateTransformer[D, T any](generator CanGenerate[T], transformer func(T) (D, error)) CanGenerate[D] {
 	return &GenerateTransformer[D, T]{
 		g: generator,
 
@@ -44,7 +44,7 @@ type ConsumerTransformer[D, T any] struct {
 	transformer func(D) (T, error)
 }
 
-func NewConsumerTransformer[D, T any](consumer CanConsume[T], transformer func(D) (T, error)) *ConsumerTransformer[D, T] {
+func NewConsumerTransformer[D, T any](consumer CanConsume[T], transformer func(D) (T, error)) CanConsume[D] {
 	return &ConsumerTransformer[D, T]{
 		c:           consumer,
 		transformer: transformer,

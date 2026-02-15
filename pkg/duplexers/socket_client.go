@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -40,10 +41,13 @@ type SocketClientConfig struct {
 	MessageType websocket.MessageType // Type of WebSocket messages (Binary/Text)
 
 	// Connection management
-	ShouldReconnectIfError      bool          // Whether to maintain a persistent connection
-	MaxReconnectionAttempts     uint8         // Maximum reconnection attempts (0 = unlimited)
-	ReconnectionAttemptDelay    time.Duration // Initial delay between reconnection attempts
-	MaxReconnectionAttemptDelay time.Duration // Maximum delay
+	ShouldReconnectIfError        bool          // Whether to maintain a persistent connection
+	MaxReconnectionAttempts       uint8         // Maximum reconnection attempts (0 = unlimited)
+	ReconnectionAttemptDelay      time.Duration // Initial delay between reconnection attempts
+	MaxReconnectionAttemptDelay   time.Duration // Maximum delay
+	StaleConnectionWarningTimeout time.Duration
+	PingPongInterval              time.Duration
+	MaxLatency                    time.Duration
 }
 
 func (c *SocketClientConfig) updateDelay() {
@@ -85,10 +89,12 @@ func (c *SocketClientConfig) wait(ctx context.Context, attempt uint8) bool {
 }
 
 type SocketClient struct {
-	conn   *Websocket
-	config SocketClientConfig // SocketClient configuration parameters
+	conn    *Websocket
+	config  SocketClientConfig // SocketClient configuration parameters
+	options *websocket.DialOptions
 
 	metrics *metrics.UnifiedMetrics // Operational metrics and statistics
+	latency atomic.Int64
 
 	// Concurrency and lifecycle management
 	once      sync.Once          // Ensures Close() is idempotent
@@ -99,17 +105,20 @@ type SocketClient struct {
 	reconnect chan struct{}      // Channel for triggering reconnection
 }
 
-func NewSocketClient(ctx context.Context, config SocketClientConfig) *SocketClient {
+func NewSocketClient(ctx context.Context, config SocketClientConfig, options *websocket.DialOptions) *SocketClient {
 	ctx2, cancel2 := context.WithCancel(ctx)
 
 	c := &SocketClient{
 		conn:      nil,
+		options:   options,
 		config:    config,
 		metrics:   metrics.NewUnifiedMetrics(ctx2, "WEBSOCKET", 10, 5*time.Second),
 		reconnect: make(chan struct{}, 1),
 		ctx:       ctx2,
-		cancel:    cancel2,
+
+		cancel: cancel2,
 	}
+	c.latency.Store(int64(config.MaxLatency))
 
 	return c
 }
@@ -184,8 +193,10 @@ func (c *SocketClient) connect() {
 			c.setConn(NewWebSocket(conn, c.config.MessageType))
 			c.metrics.SetState(metrics.ConnectedState)
 
+			// wait till failure
 			c.monitorConnection()
 			c.metrics.SetState(metrics.DisconnectedState)
+			c.closeConn()
 
 			if !c.config.shouldRetry(attempt) {
 				return
@@ -208,12 +219,49 @@ func (c *SocketClient) setConn(conn *Websocket) {
 	c.conn = conn
 }
 
+func (c *SocketClient) closeConn() {
+	c.mux.Lock()
+	defer c.mux.Unlock()
+
+	if c.conn == nil {
+		return
+	}
+
+	c.conn.Close()
+	c.conn = nil
+}
+
+func (c *SocketClient) ping() error {
+	c.mux.RLock()
+	defer c.mux.RUnlock()
+
+	if c.conn == nil {
+		return ErrSocketConnectionNotReady
+	}
+
+	ctx, cancel := context.WithTimeout(c.ctx, c.config.MaxLatency)
+	defer cancel()
+
+	return c.conn.Ping(ctx)
+}
+
+func (c *SocketClient) setLatency(l time.Duration) {
+	c.latency.Store(int64(l))
+}
+
+func (c *SocketClient) Latency() time.Duration {
+	return time.Duration(c.latency.Load())
+}
+
 func (c *SocketClient) monitorConnection() {
 	c.wg.Add(1)
 	defer c.wg.Done()
 
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(c.config.StaleConnectionWarningTimeout)
 	defer ticker.Stop()
+
+	ticker2 := time.NewTicker(c.config.PingPongInterval)
+	defer ticker2.Stop()
 
 	for {
 		select {
@@ -223,9 +271,21 @@ func (c *SocketClient) monitorConnection() {
 			fmt.Println("received reconnection request: triggering websocket reconnection...")
 			return
 		case <-ticker.C:
-			if time.Since(c.metrics.GetLastWriteTime()) > 60*time.Second || time.Since(c.metrics.GetLastReadTime()) > 60*time.Second {
-				fmt.Printf("socket connection appears stale (no writes and/or read for 60s)\n")
+			if time.Since(c.metrics.GetLastWriteTime()) > 60*time.Second && time.Since(c.metrics.GetLastReadTime()) > 60*time.Second {
+				fmt.Printf("socket connection appears stale (no writes and read for 60s)\n")
 			}
+		case <-ticker2.C:
+			now := time.Now()
+
+			if err := c.ping(); err != nil {
+				if errors.Is(err, ErrSocketConnectionNotReady) {
+					continue
+				}
+				fmt.Printf("ping failed (err=%v)\n", err)
+				c.triggerReconnection()
+			}
+
+			c.setLatency(time.Since(now))
 		}
 	}
 }
@@ -247,7 +307,7 @@ func (c *SocketClient) attemptConnection() (*websocket.Conn, error) {
 	// }
 
 	url := fmt.Sprintf("%s:%d%s", c.config.Domain, c.config.Port, c.config.Path)
-	conn, _, err := websocket.Dial(c.ctx, url, nil)
+	conn, _, err := websocket.Dial(c.ctx, url, c.options)
 	if err != nil {
 		return nil, err
 	}
@@ -357,9 +417,7 @@ func (c *SocketClient) GetMetrics() metrics.Snapshot {
 // 	return nil
 // }
 
-func (c *SocketClient) Close() error {
-	var err error = nil
-
+func (c *SocketClient) Close() {
 	c.once.Do(func() {
 		if c.cancel != nil {
 			c.cancel()
@@ -370,9 +428,9 @@ func (c *SocketClient) Close() error {
 		c.mux.Lock()
 		defer c.mux.Unlock()
 
-		err = c.conn.Close()
+		if c.conn != nil {
+			c.conn.Close()
+		}
 		close(c.reconnect)
 	})
-
-	return err
 }

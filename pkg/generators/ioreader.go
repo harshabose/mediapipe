@@ -63,7 +63,7 @@ func NewIOReader(reader io.Reader, size uint16) *IOReader {
 	}
 }
 
-func (r *IOReader) Generate(context.Context) ([]byte, error) {
+func (r *IOReader) Generate(_ context.Context) ([]byte, error) {
 	buf := make([]byte, r.size)
 	n, err := r.r.Read(buf)
 

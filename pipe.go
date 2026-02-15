@@ -26,12 +26,14 @@ type ReaderWriter[D, T any] struct {
 // Close closes the underlying Reader followed by the Writer, returning the
 // first error encountered.
 func (rw *ReaderWriter[D, T]) Close() error {
-	if err := rw.Reader.Close(); err != nil {
-		return err
-	}
+	err1 := rw.Reader.Close()
+	err2 := rw.Writer.Close()
 
-	if err := rw.Writer.Close(); err != nil {
-		return err
+	if err1 != nil {
+		return err1
+	}
+	if err2 != nil {
+		return err2
 	}
 
 	return nil
@@ -57,8 +59,8 @@ func NewGeneralReaderWriter[D, T any](generator CanGenerate[T], consumer CanCons
 
 // NewIdentityGeneralReaderWriter pairs an identity Reader and Writer for the
 // same type T.
-func NewIdentityGeneralReaderWriter[T any](reader Reader[T, T], writer Writer[T, T]) *ReaderWriter[T, T] {
-	return NewReaderWriter(reader, writer)
+func NewIdentityGeneralReaderWriter[T any](generator CanGenerate[T], consumer CanConsume[T], ) *ReaderWriter[T, T] {
+	return NewGeneralReaderWriter(generator, consumer, func(t T) (T, error) { return t, nil })
 }
 
 // Pipe is the minimal interface for a running connection between a Reader and
@@ -68,25 +70,28 @@ type Pipe[D, T any] interface {
 	Start()
 	Close()
 	Done() <-chan struct{}
+	Err() error
 }
 
 // SimplexPipe continuously reads from a Reader and writes to a Writer using an
 // internal goroutine. It stops on context cancellation or upon read/write
 // errors.
 type SimplexPipe[D, T any] struct {
+	// TODO: ADD CTX CANCEL WITH ERROR BUT THIS REQUIRED MASSIVE REFACTOR; DO THIS AFTER GADCHIROWLLI
 	reader Reader[D, T]
 	writer Writer[D, T]
+	err    error
 
 	once   sync.Once
 	mux    sync.RWMutex
 	wg     sync.WaitGroup
 	ctx    context.Context
-	cancel context.CancelFunc
+	cancel context.CancelCauseFunc
 }
 
 // NewSimplexPipe constructs a simplex pipe driven by the provided context.
 func NewSimplexPipe[D, T any](ctx context.Context, reader Reader[D, T], writer Writer[D, T]) *SimplexPipe[D, T] {
-	ctx2, cancel2 := context.WithCancel(ctx)
+	ctx2, cancel2 := context.WithCancelCause(ctx)
 
 	p := &SimplexPipe[D, T]{
 		reader: reader,
@@ -117,6 +122,10 @@ func (p *SimplexPipe[D, T]) Done() <-chan struct{} {
 	return p.ctx.Done()
 }
 
+func (p *SimplexPipe[D, T]) Err() error {
+	return context.Cause(p.ctx)
+}
+
 func (p *SimplexPipe[D, T]) loop(reader Reader[D, T], writer Writer[D, T]) {
 	defer p.Close()
 
@@ -130,12 +139,12 @@ func (p *SimplexPipe[D, T]) loop(reader Reader[D, T], writer Writer[D, T]) {
 		default:
 			data, err := p.read(reader)
 			if err != nil {
-				fmt.Printf("pipe error while reading: %v\n", err)
+				p.err = fmt.Errorf("pipe error while reading: %v\n", err)
 				return
 			}
 
 			if err := p.write(writer, data); err != nil {
-				fmt.Printf("pipe error while writing: %v\n", err)
+				p.err = fmt.Errorf("pipe error while writing: %v\n", err)
 				return
 			}
 		}
@@ -163,7 +172,7 @@ func (p *SimplexPipe[D, T]) write(writer Writer[D, T], data *Data[D, T]) error {
 func (p *SimplexPipe[D, T]) Close() {
 	p.once.Do(func() {
 		if p.cancel != nil {
-			p.cancel()
+			p.cancel(p.err)
 		}
 
 		p.wg.Wait()
@@ -201,20 +210,12 @@ func (p *DuplexPipe[D, T]) PipeB() *SimplexPipe[T, D] {
 
 // Done is closed when either direction of the duplex pipe stops.
 func (p *DuplexPipe[D, T]) Done() <-chan struct{} {
-	done := make(chan struct{})
+	return Do(p.a, p.b).Done()
+}
 
-	go func() {
-		defer close(done)
-
-		select {
-		case <-p.a.Done():
-			return
-		case <-p.b.Done():
-			return
-		}
-	}()
-
-	return done
+func (p *DuplexPipe[D, T]) Err() error {
+	// todo: cant actually use this method after the first Do
+	return Do(p.a, p.b).Err()
 }
 
 // Close stops both underlying simplex pipes.

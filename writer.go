@@ -39,6 +39,12 @@ type CanConsume[D any] interface {
 	Consume(context.Context, D) error
 }
 
+type CanConsumeFunc[D any] func(context.Context, D) error
+
+func (f CanConsumeFunc[D]) Generate(ctx context.Context, d D) error {
+	return f(ctx, d)
+}
+
 // GeneralWriter adapts a `CanConsume[D]` into a `Writer[D, T]`. It typically
 // calls `Get` on incoming `Data[D, T]` to obtain D and forwards it to the
 // consumer. An optional transformer is reserved for future use.
@@ -178,12 +184,12 @@ func (w *BufferedWriter[D, T]) loop() {
 		default:
 			data, err := w.buffer.Pop(w.ctx)
 			if err != nil {
-				fmt.Printf("buffered writer error while popping from buffer; err: %v", err)
+				// fmt.Printf("buffered writer error while popping from buffer; err: %v", err)
 				return
 			}
 
 			if err := w.writer.Write(w.ctx, data); err != nil {
-				fmt.Printf("buffered writer error while writing to the writer; err: %v\n", err)
+				// fmt.Printf("buffered writer error while writing to the writer; err: %v\n", err)
 				return
 			}
 		}
@@ -558,4 +564,274 @@ func (w *SwappableWriter[D, T]) Close() error {
 	defer w.mux.Unlock()
 
 	return w.writer.Close()
+}
+
+type CanWeightWriter[D, T any] interface {
+	Writer[D, T]
+	Weight() int64
+}
+
+type WeightWriter[D, T any] struct {
+	Writer[D, T]
+	f func() int64
+}
+
+func NewWeightWriter[D, T any](writer Writer[D, T], f func() int64) *WeightWriter[D, T] {
+	return &WeightWriter[D, T]{
+		Writer: writer,
+		f:      f,
+	}
+}
+
+func (w *WeightWriter[D, T]) Weight() int64 {
+	return w.f()
+}
+
+type WeightedWriter[D, T any] struct {
+	writers *set.SafeSet[CanWeightWriter[D, T]]
+
+	// high determines the selection strategy:
+	// true = pick the highest weight
+	// false = pick the lowest weight
+	high bool
+}
+
+func NewWeightedWriter[D, T any](high bool, writers ...Writer[D, T]) *WeightedWriter[D, T] {
+	w := &WeightedWriter[D, T]{
+		writers: set.NewSafeSet[CanWeightWriter[D, T]](),
+		high:    high,
+	}
+
+	if len(writers) > 0 {
+		for _, writer := range writers {
+			w.AddWriter(writer)
+		}
+	}
+
+	return w
+}
+
+func (w *WeightedWriter[D, T]) AddWriter(writer Writer[D, T]) {
+	if writer == nil {
+		return
+	}
+
+	ww, ok := writer.(CanWeightWriter[D, T])
+	if !ok {
+		fmt.Printf("weight writer: added writer should satisfy CanWeightWriter[D, T] interface. ignoring...\n")
+		return
+	}
+
+	w.writers.Add(ww)
+}
+
+func (w *WeightedWriter[D, T]) RemoveWriter(writer Writer[D, T]) {
+	if writer == nil {
+		return
+	}
+
+	w.writers.RemoveIf(func(ww CanWeightWriter[D, T]) bool {
+		return ww == writer
+	})
+}
+
+func (w *WeightedWriter[D, T]) Write(ctx context.Context, data *Data[D, T]) error {
+	var (
+		first        = true
+		weight int64 = 0
+		ww     CanWeightWriter[D, T]
+	)
+
+	for _, writer := range w.writers.Items() {
+		cw := writer.Weight()
+
+		if first {
+			ww = writer
+			weight = cw
+			first = false
+			continue
+		}
+
+		if (w.high && cw > weight) || (!w.high && cw < weight) {
+			ww = writer
+			weight = cw
+		}
+	}
+
+	if ww == nil {
+		// return errors.New("weighted writer: no writers available")
+		return nil // returning error stops pipe
+	}
+
+	if err := ww.Write(ctx, data); err != nil {
+		w.RemoveWriter(ww)
+
+		return w.Write(ctx, data)
+	}
+
+	return nil
+}
+
+func (w *WeightedWriter[D, T]) Size() int {
+	return w.writers.Size()
+}
+
+func (w *WeightedWriter[D, T]) Close() error {
+	var merr error = nil
+
+	for _, writer := range w.writers.Items() {
+		if err := writer.Close(); err != nil {
+			merr = multierr.Append(merr, err)
+		}
+	}
+
+	w.writers.Clear()
+
+	return merr
+}
+
+type StickyWeightedWriter[D, T any] struct {
+	writers *set.SafeSet[CanWeightWriter[D, T]]
+
+	current CanWeightWriter[D, T]
+	mux     sync.RWMutex
+	high    bool
+}
+
+func NewStickyWeightedWriter[D, T any](high bool, writers ...Writer[D, T]) *StickyWeightedWriter[D, T] {
+	w := &StickyWeightedWriter[D, T]{
+		writers: set.NewSafeSet[CanWeightWriter[D, T]](),
+		high:    high,
+	}
+
+	if len(writers) > 0 {
+		for _, writer := range writers {
+			w.AddWriter(writer)
+		}
+	}
+
+	return w
+}
+
+func (w *StickyWeightedWriter[D, T]) AddWriter(writer Writer[D, T]) {
+	if writer == nil {
+		return
+	}
+	ww, ok := writer.(CanWeightWriter[D, T])
+	if !ok {
+		fmt.Printf("sticky weight writer: added writer should satisfy CanWeightWriter[D, T] interface. ignoring...\n")
+		return
+	}
+
+	w.writers.Add(ww)
+
+	w.mux.Lock()
+	if w.current == nil {
+		w.current = ww
+	}
+	w.mux.Unlock()
+}
+
+func (w *StickyWeightedWriter[D, T]) RemoveWriter(writer Writer[D, T]) {
+	if writer == nil {
+		return
+	}
+
+	w.writers.RemoveIf(func(ww CanWeightWriter[D, T]) bool {
+		return ww == writer
+	})
+
+	w.mux.Lock()
+	defer w.mux.Unlock()
+
+	if w.current == writer {
+		w.current = nil
+	}
+}
+
+func (w *StickyWeightedWriter[D, T]) Write(ctx context.Context, data *Data[D, T]) error {
+	active, err := w.get()
+	if err != nil {
+		return err
+	}
+
+	if active == nil {
+		return nil
+	}
+
+	if err := active.Write(ctx, data); err != nil {
+		w.RemoveWriter(active)
+
+		return w.Write(ctx, data)
+	}
+
+	return nil
+}
+
+func (w *StickyWeightedWriter[D, T]) get() (CanWeightWriter[D, T], error) {
+	if current := w.get2(); current != nil {
+		return current, nil
+	}
+
+	return w.set()
+}
+
+func (w *StickyWeightedWriter[D, T]) get2() CanWeightWriter[D, T] {
+	w.mux.RLock()
+	defer w.mux.RUnlock()
+
+	return w.current
+}
+
+func (w *StickyWeightedWriter[D, T]) set() (CanWeightWriter[D, T], error) {
+	w.mux.Lock()
+	defer w.mux.Unlock()
+
+	if w.current != nil {
+		return w.current, nil
+	}
+
+	var (
+		first  = true
+		ww     CanWeightWriter[D, T]
+		weight int64 = 0
+	)
+
+	for _, writer := range w.writers.Items() {
+		cw := writer.Weight()
+
+		if first {
+			ww = writer
+			weight = cw
+			first = false
+			continue
+		}
+
+		if (w.high && cw > weight) || (!w.high && cw < weight) {
+			ww = writer
+			weight = cw
+		}
+	}
+
+	if ww == nil {
+		// return nil, errors.New("sticky writer: no writers available")
+		return nil, nil // returning error stops pipe
+	}
+
+	w.current = ww
+	return ww, nil
+}
+
+func (w *StickyWeightedWriter[D, T]) Close() error {
+	var merr error = nil
+
+	for _, writer := range w.writers.Items() {
+		if err := writer.Close(); err != nil {
+			merr = multierr.Append(merr, err)
+		}
+	}
+
+	w.writers.Clear()
+
+	return merr
 }
