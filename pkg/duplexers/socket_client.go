@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -48,6 +47,7 @@ type SocketClientConfig struct {
 	StaleConnectionWarningTimeout time.Duration
 	PingPongInterval              time.Duration
 	MaxLatency                    time.Duration
+	MaxPingFailCount              uint8
 }
 
 func (c *SocketClientConfig) updateDelay() {
@@ -94,7 +94,7 @@ type SocketClient struct {
 	options *websocket.DialOptions
 
 	metrics *metrics.UnifiedMetrics // Operational metrics and statistics
-	latency atomic.Int64
+	fail    uint8                   // ping fail count; will be replaced by modified UnifiedMetrics to better support other metrics logging services
 
 	// Concurrency and lifecycle management
 	once      sync.Once          // Ensures Close() is idempotent
@@ -118,7 +118,6 @@ func NewSocketClient(ctx context.Context, config SocketClientConfig, options *we
 
 		cancel: cancel2,
 	}
-	c.latency.Store(int64(config.MaxLatency))
 
 	return c
 }
@@ -139,12 +138,7 @@ func (c *SocketClient) WaitForConnection(timeout time.Duration) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-
-			c.mux.RLock()
-			connected := c.conn != nil
-			c.mux.RUnlock()
-
-			if connected && c.metrics.GetState() == metrics.ConnectedState {
+			if _, exits := c.getConn(); exits && c.metrics.GetState() == metrics.ConnectedState {
 				return nil
 			}
 		}
@@ -219,6 +213,17 @@ func (c *SocketClient) setConn(conn *Websocket) {
 	c.conn = conn
 }
 
+func (c *SocketClient) getConn() (*Websocket, bool) {
+	c.mux.RLock()
+	defer c.mux.RUnlock()
+
+	if c.conn != nil {
+		return c.conn, true
+	}
+
+	return nil, false
+}
+
 func (c *SocketClient) closeConn() {
 	c.mux.Lock()
 	defer c.mux.Unlock()
@@ -232,25 +237,43 @@ func (c *SocketClient) closeConn() {
 }
 
 func (c *SocketClient) ping() error {
-	c.mux.RLock()
-	defer c.mux.RUnlock()
-
-	if c.conn == nil {
+	conn, exits := c.getConn()
+	if !exits {
 		return ErrSocketConnectionNotReady
 	}
 
 	ctx, cancel := context.WithTimeout(c.ctx, c.config.MaxLatency)
 	defer cancel()
 
-	return c.conn.Ping(ctx)
+	if err := conn.Ping(ctx); err != nil {
+		if c.incrementFailCount() {
+			return err
+		}
+		return nil
+	}
+
+	c.zeroFailCount()
+
+	return nil
 }
 
-func (c *SocketClient) setLatency(l time.Duration) {
-	c.latency.Store(int64(l))
+func (c *SocketClient) incrementFailCount() bool {
+	c.mux.Lock()
+	defer c.mux.Unlock()
+
+	if c.fail >= c.config.MaxPingFailCount {
+		return true
+	}
+
+	c.fail++
+	return false
 }
 
-func (c *SocketClient) Latency() time.Duration {
-	return time.Duration(c.latency.Load())
+func (c *SocketClient) zeroFailCount() {
+	c.mux.Lock()
+	defer c.mux.Unlock()
+
+	c.fail = 0
 }
 
 func (c *SocketClient) monitorConnection() {
@@ -275,8 +298,6 @@ func (c *SocketClient) monitorConnection() {
 				fmt.Printf("socket connection appears stale (no writes and read for 60s)\n")
 			}
 		case <-ticker2.C:
-			now := time.Now()
-
 			if err := c.ping(); err != nil {
 				if errors.Is(err, ErrSocketConnectionNotReady) {
 					continue
@@ -284,8 +305,6 @@ func (c *SocketClient) monitorConnection() {
 				fmt.Printf("ping failed (err=%v)\n", err)
 				c.triggerReconnection()
 			}
-
-			c.setLatency(time.Since(now))
 		}
 	}
 }
