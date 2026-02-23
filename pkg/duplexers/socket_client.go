@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -47,7 +48,7 @@ type SocketClientConfig struct {
 	StaleConnectionWarningTimeout time.Duration
 	PingPongInterval              time.Duration
 	MaxLatency                    time.Duration
-	MaxPingFailCount              uint8
+	MaxPingFailCount              uint32
 }
 
 func (c *SocketClientConfig) updateDelay() {
@@ -94,7 +95,7 @@ type SocketClient struct {
 	options *websocket.DialOptions
 
 	metrics *metrics.UnifiedMetrics // Operational metrics and statistics
-	fail    uint8                   // ping fail count; will be replaced by modified UnifiedMetrics to better support other metrics logging services
+	fail    atomic.Uint32           // ping fail count; will be replaced by modified UnifiedMetrics to better support other metrics logging services
 
 	// Concurrency and lifecycle management
 	once      sync.Once          // Ensures Close() is idempotent
@@ -114,6 +115,7 @@ func NewSocketClient(ctx context.Context, config SocketClientConfig, options *we
 		config:    config,
 		metrics:   metrics.NewUnifiedMetrics(ctx2, "WEBSOCKET", 10, 5*time.Second),
 		reconnect: make(chan struct{}, 1),
+		fail:      atomic.Uint32{},
 		ctx:       ctx2,
 
 		cancel: cancel2,
@@ -258,22 +260,16 @@ func (c *SocketClient) ping() error {
 }
 
 func (c *SocketClient) incrementFailCount() bool {
-	c.mux.Lock()
-	defer c.mux.Unlock()
-
-	if c.fail >= c.config.MaxPingFailCount {
+	if c.fail.Load() >= c.config.MaxPingFailCount {
 		return true
 	}
 
-	c.fail++
+	c.fail.Add(1)
 	return false
 }
 
 func (c *SocketClient) zeroFailCount() {
-	c.mux.Lock()
-	defer c.mux.Unlock()
-
-	c.fail = 0
+	c.fail.Store(0)
 }
 
 func (c *SocketClient) monitorConnection() {
