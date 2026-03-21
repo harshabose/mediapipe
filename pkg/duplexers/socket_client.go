@@ -151,6 +151,10 @@ func (c *SocketClient) Done() <-chan struct{} {
 	return c.ctx.Done()
 }
 
+func (c *SocketClient) GetState() metrics.State {
+	return c.metrics.GetState()
+}
+
 func (c *SocketClient) connect() {
 	c.wg.Add(1)
 	defer c.wg.Done()
@@ -298,6 +302,7 @@ func (c *SocketClient) monitorConnection() {
 				if errors.Is(err, ErrSocketConnectionNotReady) {
 					continue
 				}
+				c.metrics.SetState(metrics.ErrorState)
 				fmt.Printf("ping failed (err=%v)\n", err)
 				c.triggerReconnection()
 			}
