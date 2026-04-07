@@ -2,6 +2,7 @@ package duplexers
 
 import (
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/pion/datachannel"
@@ -34,4 +35,16 @@ func NewDIO(dc *webrtc.DataChannel, size uint16) (*DIO, error) {
 		IOWriter: consumers.NewIOWriter(rw, size),
 		IOReader: generators.NewIOReader(rw, size),
 	}, nil
+}
+
+type IO struct {
+	*consumers.IOWriter
+	*generators.IOReader
+}
+
+func NewIO(r io.Reader, w io.Writer, size uint16) *IO {
+	return &IO{
+		IOWriter: consumers.NewIOWriter(w, size),
+		IOReader: generators.NewIOReader(r, size),
+	}
 }
