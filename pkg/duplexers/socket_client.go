@@ -59,6 +59,10 @@ func (c *SocketClientConfig) updateDelay() {
 	c.ReconnectionAttemptDelay = newDelay
 }
 
+func (c *SocketClientConfig) resetDelay() {
+	c.ReconnectionAttemptDelay = 2 * time.Second
+}
+
 func (c *SocketClientConfig) shouldRetry(attempt uint8) bool {
 	if !c.ShouldReconnectIfError {
 		fmt.Println("not retrying as not configured to reconnect")
@@ -102,7 +106,7 @@ type SocketClient struct {
 	ctx       context.Context    // SocketClient context for cancellation
 	cancel    context.CancelFunc // Function to cancel client operations
 	mux       sync.RWMutex       // Protects reader/writer access
-	wg        sync.WaitGroup     // Synchronises background goroutines
+	wg        sync.WaitGroup     // Synchronizes background goroutines
 	reconnect chan struct{}      // Channel for triggering reconnection
 }
 
@@ -161,8 +165,6 @@ func (c *SocketClient) connect() {
 
 	defer c.metrics.SetState(metrics.DisconnectedState)
 
-	var attempt uint8 = 0
-
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -170,44 +172,35 @@ func (c *SocketClient) connect() {
 		default:
 			c.metrics.SetState(metrics.ConnectingState)
 
+			var attemptCount uint8 = 0
 			conn, err := c.attemptConnection()
 			if err != nil {
 				c.metrics.SetState(metrics.ErrorState)
 				c.metrics.AddErrors(err)
 
-				if !c.config.shouldRetry(attempt) {
+				if !c.config.shouldRetry(attemptCount) {
 					return
 				}
 
-				if !c.config.wait(c.ctx, attempt) {
+				if !c.config.wait(c.ctx, attemptCount) {
 					return
 				}
 
 				c.config.updateDelay()
 
-				attempt++
+				attemptCount++
 				continue
 			}
 
 			// Connection successful
 			c.setConn(NewWebSocket(conn, c.config.MessageType))
 			c.metrics.SetState(metrics.ConnectedState)
+			c.config.resetDelay()
 
 			// wait till failure
 			c.monitorConnection()
 			c.metrics.SetState(metrics.DisconnectedState)
 			c.closeConn()
-
-			if !c.config.shouldRetry(attempt) {
-				return
-			}
-
-			if !c.config.wait(c.ctx, attempt) {
-				return
-			}
-
-			c.config.updateDelay()
-			attempt++
 		}
 	}
 }
