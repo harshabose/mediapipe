@@ -165,6 +165,7 @@ func (c *SocketClient) connect() {
 
 	defer c.metrics.SetState(metrics.DisconnectedState)
 
+	var attemptCount uint8 = 0
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -172,7 +173,6 @@ func (c *SocketClient) connect() {
 		default:
 			c.metrics.SetState(metrics.ConnectingState)
 
-			var attemptCount uint8 = 0
 			conn, err := c.attemptConnection()
 			if err != nil {
 				c.metrics.SetState(metrics.ErrorState)
