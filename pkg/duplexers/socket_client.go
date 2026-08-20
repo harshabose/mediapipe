@@ -172,7 +172,7 @@ func (c *SocketClient) connect() {
 			return
 		default:
 			c.metrics.SetState(metrics.ConnectingState)
-
+			fmt.Println("attempting socket connection...")
 			conn, err := c.attemptConnection()
 			if err != nil {
 				c.metrics.SetState(metrics.ErrorState)
@@ -191,7 +191,7 @@ func (c *SocketClient) connect() {
 				attemptCount++
 				continue
 			}
-
+			fmt.Println("socket connection successful...")
 			// Connection successful
 			c.setConn(NewWebSocket(conn, c.config.MessageType))
 			c.metrics.SetState(metrics.ConnectedState)
