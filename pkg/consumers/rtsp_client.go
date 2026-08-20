@@ -212,11 +212,14 @@ func (c *RTSPClient) attemptConnection() error {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
+	transportTCP := gortsplib.TransportTCP
 	c.client = &gortsplib.Client{
 		ReadTimeout:    c.config.ReadTimeout,
 		WriteTimeout:   c.config.WriteTimeout,
 		UserAgent:      c.config.UserAgent,
 		WriteQueueSize: c.config.WriteQueueSize, // added for ffmpeg-c-api-bitrate-update branch; todo: remove later
+		AnyPortEnable:  true,
+		Transport:      &transportTCP,
 	}
 
 	if err := c.client.StartRecording(c.rtspURL, c.description); err != nil {

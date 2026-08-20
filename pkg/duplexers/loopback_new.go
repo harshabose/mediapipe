@@ -51,8 +51,9 @@ type LocalUDP struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 
-	mux  sync.RWMutex
-	pool sync.Pool
+	mux                sync.RWMutex
+	pool               sync.Pool
+	remoteNotReadyOnce sync.Once
 }
 
 func NewLoopBack(ctx context.Context, options ...LoopBackOption) (*LocalUDP, error) {
@@ -163,9 +164,10 @@ func (l *LocalUDP) write(_ context.Context, payload []byte) error {
 		return err
 	}
 	if l.remote.addr == nil {
-		err := fmt.Errorf("remote port not yet discovered")
-		l.metrics.AddErrors(err)
-		return err
+		l.remoteNotReadyOnce.Do(func() {
+			fmt.Println("remote port not yet discovered, dropping packets until discovered")
+		})
+		return nil
 	}
 
 	bytesWritten, err := l.bind.conn.WriteToUDP(payload, l.remote.addr)
